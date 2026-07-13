@@ -17,6 +17,9 @@ const ADMINS = ["윤주호"];
 const PENDING_KEY = "replay-chat:pending";
 type Pending = { id: string; answer: string; scenes: string[] | null };
 
+/** 답이 끝나기 전에 스트림이 끊겼다. 서버는 계속 그리고 있으니 기다렸다 받아오면 된다. */
+class StreamDropped extends Error {}
+
 function savePending(pending: Pending) {
   try {
     localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
@@ -296,6 +299,8 @@ export default function Chat({ username }: { username: string }) {
       const decoder = new TextDecoder();
       let buffer = "";
       let answer = "";
+      // done 이벤트를 받아야 답이 끝난 것이다. 그전에 스트림이 닫히면 끊긴 거다.
+      let finished = false;
       const drawn: Attachment[] = [];
 
       while (true) {
@@ -331,6 +336,7 @@ export default function Chat({ username }: { username: string }) {
           } else if (event === "error") {
             throw new Error(data.message);
           } else if (event === "done") {
+            finished = true;
             setMessages((prev) => [
               ...prev,
               {
@@ -348,12 +354,17 @@ export default function Chat({ username }: { username: string }) {
         }
       }
 
+      // 다른 탭에 다녀오면 브라우저가 이 연결을 정리해 버린다. 그때 read() 가 터지기도 하고
+      // (사파리는 "Load failed"), 아무 일 없었다는 듯 스트림만 조용히 닫히기도 한다. 둘 다 끊긴 거다.
+      if (!finished) throw new StreamDropped();
+
       loadConversations();
     } catch (err) {
-      // 연결이 끊긴 것뿐이면(사파리는 이때 "Load failed" 라고만 알려준다) 서버는 아랑곳없이
-      // 그림을 다 그리고 답을 DB 에 남긴다. 그러니 "그리는 중" 표시를 지우지 말고 그대로 둔 채,
-      // 답이 들어올 때까지 기다렸다가 보여준다. 사용자에겐 아무 일도 없던 것처럼 보인다.
-      if (err instanceof TypeError && activeId) {
+      // 끊긴 것뿐이면 서버는 아랑곳없이 그림을 다 그리고 답을 DB 에 남긴다. 그러니 "그리는 중"
+      // 표시를 지우지 말고 그대로 둔 채, 답이 들어올 때까지 기다렸다 보여준다.
+      const dropped = err instanceof StreamDropped || err instanceof TypeError;
+
+      if (dropped && activeId) {
         const id = activeId;
         setRecovering(true);
         pollForAnswer(id).then((list) => {
