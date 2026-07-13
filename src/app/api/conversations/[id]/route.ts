@@ -24,7 +24,7 @@ export async function GET(_req: Request, { params }: Params) {
 
   const { data: messages } = await supabase
     .from("messages")
-    .select("id, role, content, created_at, attachments(id, storage_path, mime_type)")
+    .select("id, role, content, created_at, attachments(id, storage_path, mime_type, caption)")
     .eq("conversation_id", id)
     .order("created_at", { ascending: true });
 
@@ -38,9 +38,10 @@ export async function GET(_req: Request, { params }: Params) {
           (m.attachments ?? []).map(async (a) => ({
             id: a.id,
             url: await signImage(a.storage_path),
+            caption: a.caption,
           })),
         )
-      ).filter((a): a is { id: string; url: string } => Boolean(a.url)),
+      ).filter((a): a is { id: string; url: string; caption: string | null } => Boolean(a.url)),
     })),
   );
 

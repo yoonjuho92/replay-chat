@@ -36,6 +36,8 @@ create table if not exists public.attachments (
   storage_path text not null,
   mime_type text not null,
   size_bytes integer,
+  -- AI 가 그린 그림에 붙는 장면 이름. 사용자가 올린 사진은 비어 있다.
+  caption text,
   created_at timestamptz not null default now()
 );
 create index if not exists attachments_message_idx on public.attachments (message_id);

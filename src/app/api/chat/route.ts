@@ -1,16 +1,30 @@
 import { NextResponse } from "next/server";
+import { toFile } from "openai";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { supabase, signImage, IMAGE_BUCKET } from "@/lib/supabase";
 import { getSession } from "@/lib/session";
-import { openai, CHAT_MODEL, IMAGE_MODEL, SYSTEM_PROMPT } from "@/lib/openai";
+import { openai, CHAT_MODEL, IMAGE_MODEL, DRAW_TOOL, SYSTEM_PROMPT } from "@/lib/openai";
 
-// 자서전 한 편이 3000-5000자라 생성이 길다. 기본 제한으로는 잘린다.
+// 자서전 한 편이 3000-5000자라 생성이 길고, 그림도 세 장을 그린다.
 export const maxDuration = 300;
+
+type Scene = { title: string; prompt: string };
+type Photo = { bytes: Buffer; mime: string };
 
 function titleFrom(text: string) {
   const line = text.trim().split("\n")[0];
   if (!line) return "새 대화";
   return line.length > 40 ? `${line.slice(0, 40)}…` : line;
+}
+
+/** 그림 모델에 넘길 최종 지시문. 얼굴을 살리고 글씨는 넣지 않는다. */
+function drawPrompt(scene: Scene, style: string) {
+  return [
+    `${style} 그림체로 그려라.`,
+    `함께 주는 사진 속 인물이 이 그림의 주인공이다. 그 사람의 얼굴과 인상을 그대로 살려서, 같은 사람으로 알아볼 수 있게 그려라.`,
+    `장면: ${scene.prompt}`,
+    `그림 안에 글씨, 문자, 숫자, 간판, 서명, 워터마크를 절대 넣지 마라.`,
+  ].join("\n");
 }
 
 export async function POST(req: Request) {
@@ -73,7 +87,7 @@ export async function POST(req: Request) {
 
   const { data: history } = await supabase
     .from("messages")
-    .select("id, role, content, created_at, attachments(storage_path)")
+    .select("id, role, content, created_at, attachments(storage_path, mime_type)")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true });
 
@@ -88,6 +102,9 @@ export async function POST(req: Request) {
   };
 
   const input: ResponseInputItem[] = [];
+  // 사용자가 올린 사진. 그림을 그릴 때 얼굴 참조로 쓴다.
+  const uploaded: { storage_path: string; mime_type: string }[] = [];
+
   for (const message of history ?? []) {
     const attachments = message.attachments ?? [];
 
@@ -107,6 +124,8 @@ export async function POST(req: Request) {
       continue;
     }
 
+    uploaded.push(...attachments);
+
     const content: ResponseInputItem.Message["content"] = [];
     if (message.content) content.push({ type: "input_text", text: message.content });
     content.push(...(await asImages(attachments)));
@@ -124,15 +143,18 @@ export async function POST(req: Request) {
       send("start", { conversationId, userMessageId: userMessage.id });
 
       let answer = "";
-      const drawn: string[] = [];
+      const drawn: { path: string; caption: string }[] = [];
 
-      try {
+      /** 한 번의 모델 호출을 스트리밍하면서, draw_scenes 를 부르면 그 호출을 돌려준다. */
+      const run = async (items: ResponseInputItem[]) => {
+        let call: { id: string; item: ResponseInputItem; scenes: Scene[]; style: string } | null =
+          null;
+
         const events = await openai.responses.create({
           model: CHAT_MODEL,
           instructions: SYSTEM_PROMPT,
-          input,
-          // 대화에 올라온 사진이 그대로 참조 이미지가 된다. 모델이 필요할 때 알아서 부른다.
-          tools: [{ type: "image_generation", model: IMAGE_MODEL, size: "auto", quality: "medium" }],
+          input: items,
+          tools: [DRAW_TOOL],
           stream: true,
         });
 
@@ -146,26 +168,102 @@ export async function POST(req: Request) {
               answer = event.text;
               send("delta", { text: event.text });
             }
-          } else if (event.type === "response.image_generation_call.generating") {
-            send("drawing", {});
           } else if (
             event.type === "response.output_item.done" &&
-            event.item.type === "image_generation_call" &&
-            event.item.result
+            event.item.type === "function_call" &&
+            event.item.name === DRAW_TOOL.name
           ) {
-            const path = `${session.userId}/gen-${crypto.randomUUID()}.png`;
-            const { error } = await supabase.storage
-              .from(IMAGE_BUCKET)
-              .upload(path, Buffer.from(event.item.result, "base64"), {
-                contentType: "image/png",
-              });
-
-            if (!error) {
-              drawn.push(path);
-              send("image", { url: await signImage(path) });
-            }
+            const args = JSON.parse(event.item.arguments);
+            call = {
+              id: event.item.call_id,
+              item: event.item,
+              scenes: args.scenes as Scene[],
+              style: String(args.style ?? ""),
+            };
           } else if (event.type === "response.failed" || event.type === "error") {
             throw new Error("모델 응답이 실패했습니다.");
+          }
+        }
+
+        return call;
+      };
+
+      try {
+        const call = await run(input);
+
+        if (call) {
+          // 사진 없이 그리면 얼굴을 살릴 수 없다. 모델에게 사실대로 알리고 사진을 청하게 한다.
+          if (uploaded.length === 0) {
+            input.push(call.item, {
+              type: "function_call_output",
+              call_id: call.id,
+              output: "사용자가 올린 사진이 없어 그리지 못했다. 사진을 먼저 올려달라고 청해라.",
+            });
+            await run(input);
+          } else {
+            send("drawing", { scenes: call.scenes.map((s) => s.title) });
+
+            // 가장 최근에 올린 사진을 얼굴 참조로 쓴다.
+            const photos: Photo[] = [];
+            for (const attachment of uploaded.slice(-2)) {
+              const { data } = await supabase.storage
+                .from(IMAGE_BUCKET)
+                .download(attachment.storage_path);
+              if (data) {
+                photos.push({
+                  bytes: Buffer.from(await data.arrayBuffer()),
+                  mime: attachment.mime_type,
+                });
+              }
+            }
+
+            // 세 장면을 한꺼번에 그린다. 순서대로 그리면 세 배로 오래 걸린다.
+            const results = await Promise.all(
+              call.scenes.map(async (scene) => {
+                // 파일 핸들은 요청마다 새로 만들어야 한다. 하나를 돌려 쓰면 두 번째 요청에서 비어 버린다.
+                const images = await Promise.all(
+                  photos.map((photo, i) =>
+                    toFile(photo.bytes, `photo-${i}.png`, { type: photo.mime }),
+                  ),
+                );
+
+                const drawing = await openai.images.edit({
+                  model: IMAGE_MODEL,
+                  image: images,
+                  prompt: drawPrompt(scene, call.style),
+                  size: "1024x1024",
+                  quality: "medium",
+                });
+
+                const b64 = drawing.data?.[0]?.b64_json;
+                if (!b64) return null;
+
+                const path = `${session.userId}/gen-${crypto.randomUUID()}.png`;
+                const { error } = await supabase.storage
+                  .from(IMAGE_BUCKET)
+                  .upload(path, Buffer.from(b64, "base64"), { contentType: "image/png" });
+
+                if (error) return null;
+                return { path, caption: scene.title };
+              }),
+            );
+
+            for (const result of results) {
+              if (!result) continue;
+              drawn.push(result);
+              send("image", { url: await signImage(result.path), caption: result.caption });
+            }
+
+            // 그림을 다 그렸다고 알려주고 마무리 말을 하게 한다.
+            input.push(call.item, {
+              type: "function_call_output",
+              call_id: call.id,
+              output: JSON.stringify({
+                drawn: drawn.map((d) => d.caption),
+                note: "그림은 이미 사용자 화면에 떴다. 다시 설명하지 말고, 마음에 드는지 짧게 묻기만 해라.",
+              }),
+            });
+            await run(input);
           }
         }
       } catch (err) {
@@ -185,12 +283,13 @@ export async function POST(req: Request) {
       // 그린 그림도 그 답변에 매달아 둬야 다음에 대화를 열었을 때 같이 뜬다.
       if (saved && drawn.length > 0) {
         await supabase.from("attachments").insert(
-          drawn.map((path) => ({
+          drawn.map((d) => ({
             message_id: saved.id,
             conversation_id: conversationId,
             user_id: session.userId,
-            storage_path: path,
+            storage_path: d.path,
             mime_type: "image/png",
+            caption: d.caption,
           })),
         );
       }

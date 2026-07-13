@@ -9,7 +9,7 @@ import { parseStory } from "@/lib/story";
 /** /admin 에 들어갈 수 있는 사람. 서버에서 한 번 더 막으므로 여기선 링크 노출용일 뿐이다. */
 const ADMINS = ["윤주호"];
 
-type Attachment = { id: string; url: string };
+type Attachment = { id: string; url: string; caption?: string | null };
 type Message = { id: string; role: string; content: string; images: Attachment[] };
 type Conversation = { id: string; title: string; updated_at: string };
 
@@ -25,7 +25,7 @@ export default function Chat({ username }: { username: string }) {
   const [pending, setPending] = useState<Attachment[]>([]);
   const [streaming, setStreaming] = useState<string | null>(null);
   const [streamImages, setStreamImages] = useState<Attachment[]>([]);
-  const [drawing, setDrawing] = useState(false);
+  const [drawing, setDrawing] = useState<string[] | null>(null);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -134,6 +134,9 @@ export default function Chat({ username }: { username: string }) {
       return;
     }
 
+    // 그림을 그리는 동안은 마이크를 켤 수 없다.
+    if (drawing) return;
+
     setError(null);
     beforeMic.current = input.trim();
     mic.start();
@@ -160,7 +163,7 @@ export default function Chat({ username }: { username: string }) {
     setSending(true);
     setStreaming("");
     setStreamImages([]);
-    setDrawing(false);
+    setDrawing(null);
     setError(null);
 
     try {
@@ -201,11 +204,11 @@ export default function Chat({ username }: { username: string }) {
             answer += data.text;
             setStreaming(answer);
           } else if (event === "drawing") {
-            setDrawing(true);
+            setDrawing(data.scenes ?? []);
           } else if (event === "image") {
-            drawn.push({ id: `drawn-${drawn.length}`, url: data.url });
+            // 세 장을 한꺼번에 그린다. 다 끝나야(done) 그리기가 끝난 것이다.
+            drawn.push({ id: `drawn-${drawn.length}`, url: data.url, caption: data.caption });
             setStreamImages([...drawn]);
-            setDrawing(false);
           } else if (event === "error") {
             throw new Error(data.message);
           } else if (event === "done") {
@@ -220,7 +223,7 @@ export default function Chat({ username }: { username: string }) {
             ]);
             setStreaming(null);
             setStreamImages([]);
-            setDrawing(false);
+            setDrawing(null);
           }
         }
       }
@@ -230,7 +233,7 @@ export default function Chat({ username }: { username: string }) {
       setError(err instanceof Error ? err.message : "전송에 실패했습니다.");
       setStreaming(null);
       setStreamImages([]);
-      setDrawing(false);
+      setDrawing(null);
     } finally {
       setSending(false);
     }
@@ -330,13 +333,22 @@ export default function Chat({ username }: { username: string }) {
                   <Images images={streamImages} />
 
                   {drawing && (
-                    <p
-                      className="flex items-center gap-2 text-[17px]"
-                      style={{ color: "var(--muted)" }}
+                    <div
+                      className="rounded-2xl border px-5 py-4"
+                      style={{ borderColor: "var(--border)", background: "var(--surface)" }}
                     >
-                      <Spinner />
-                      그림을 그리는 중…
-                    </p>
+                      <p className="flex items-center gap-2 text-[17px] font-medium">
+                        <Spinner />
+                        장면 {drawing.length}개를 한꺼번에 그리는 중…
+                      </p>
+                      <ul className="mt-3 space-y-1.5">
+                        {drawing.map((scene, i) => (
+                          <li key={i} className="text-[16px]" style={{ color: "var(--muted)" }}>
+                            {i + 1}. {scene}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   )}
                 </div>
               )}
@@ -434,7 +446,8 @@ export default function Chat({ username }: { username: string }) {
               <div className="flex items-center gap-2">
                 <button
                   onClick={toggleMic}
-                  className={`flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-white/5 ${
+                  disabled={Boolean(drawing)}
+                  className={`flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40 ${
                     mic.recording ? "recording" : ""
                   }`}
                   style={{
@@ -442,8 +455,20 @@ export default function Chat({ username }: { username: string }) {
                     background: mic.recording ? "var(--accent)" : undefined,
                     color: mic.recording ? "#fff" : "var(--muted)",
                   }}
-                  aria-label={mic.recording ? "말 그만하기" : "음성으로 말하기"}
-                  title={mic.recording ? "말 그만하기" : "음성으로 말하기"}
+                  aria-label={
+                    drawing
+                      ? "그림을 그리는 동안은 말할 수 없습니다"
+                      : mic.recording
+                        ? "말 그만하기"
+                        : "음성으로 말하기"
+                  }
+                  title={
+                    drawing
+                      ? "그림을 그리는 동안은 말할 수 없습니다"
+                      : mic.recording
+                        ? "말 그만하기"
+                        : "음성으로 말하기"
+                  }
                 >
                   {mic.connecting ? <Spinner /> : mic.recording ? <StopIcon /> : <MicIcon />}
                 </button>
@@ -632,16 +657,25 @@ function Images({ images }: { images: Attachment[] }) {
   if (images.length === 0) return null;
 
   return (
-    <div className="flex flex-wrap gap-2">
+    <div className="grid gap-4 sm:grid-cols-2">
       {images.map((img) => (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          key={img.id}
-          src={img.url}
-          alt="AI 가 그린 그림"
-          className="max-h-[420px] w-full max-w-md rounded-2xl border object-cover"
-          style={{ borderColor: "var(--border)" }}
-        />
+        <figure key={img.id}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={img.url}
+            alt={img.caption ?? "AI 가 그린 그림"}
+            className="w-full rounded-2xl border object-cover"
+            style={{ borderColor: "var(--border)" }}
+          />
+          {img.caption && (
+            <figcaption
+              className="mt-2 px-1 text-[15px] leading-snug"
+              style={{ color: "var(--muted)" }}
+            >
+              {img.caption}
+            </figcaption>
+          )}
+        </figure>
       ))}
     </div>
   );

@@ -10,16 +10,22 @@ type Row = {
     role: string;
     content: string;
     created_at: string;
-    attachments: { id: string; storage_path: string }[];
+    attachments: { id: string; storage_path: string; caption: string | null }[];
   }[];
 };
 
-type Image = { id: string; url: string };
+type Image = { id: string; url: string; caption: string | null };
 type Story = { text: string; at: string; sortKey: string };
 
-async function sign(list: { id: string; storage_path: string }[]): Promise<Image[]> {
+async function sign(
+  list: { id: string; storage_path: string; caption: string | null }[],
+): Promise<Image[]> {
   const signed = await Promise.all(
-    list.map(async (a) => ({ id: a.id, url: await signImage(a.storage_path) })),
+    list.map(async (a) => ({
+      id: a.id,
+      url: await signImage(a.storage_path),
+      caption: a.caption,
+    })),
   );
   return signed.filter((a): a is Image => Boolean(a.url));
 }
@@ -37,7 +43,7 @@ export default async function AdminPage() {
   const { data } = await supabase
     .from("conversations")
     .select(
-      "id, title, updated_at, users(username), messages(role, content, created_at, attachments(id, storage_path))",
+      "id, title, updated_at, users(username), messages(role, content, created_at, attachments(id, storage_path, caption))",
     )
     .overrideTypes<Row[]>();
 
@@ -168,14 +174,23 @@ export default async function AdminPage() {
                       </div>
                       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                         {session.drawn.map((img) => (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            key={img.id}
-                            src={img.url}
-                            alt="AI 가 그린 그림"
-                            className="aspect-square w-full rounded-xl border object-cover"
-                            style={{ borderColor: "var(--border)" }}
-                          />
+                          <figure key={img.id}>
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={img.url}
+                              alt={img.caption ?? "AI 가 그린 그림"}
+                              className="aspect-square w-full rounded-xl border object-cover"
+                              style={{ borderColor: "var(--border)" }}
+                            />
+                            {img.caption && (
+                              <figcaption
+                                className="mt-1.5 text-[13px] leading-snug"
+                                style={{ color: "var(--muted)" }}
+                              >
+                                {img.caption}
+                              </figcaption>
+                            )}
+                          </figure>
                         ))}
                       </div>
                     </div>
