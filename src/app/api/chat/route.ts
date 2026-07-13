@@ -190,9 +190,26 @@ export async function POST(req: Request) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
-      const send = (event: string, data: unknown) => {
-        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      // 사용자가 창을 닫으면 enqueue 가 터진다. 그때도 이야기는 DB 에 남겨야 하므로
+      // 스트림 쓰기는 실패해도 삼키고, 뒷일은 그대로 끝까지 해낸다.
+      let open = true;
+      const write = (chunk: string) => {
+        if (!open) return;
+        try {
+          controller.enqueue(encoder.encode(chunk));
+        } catch {
+          open = false;
+        }
       };
+
+      const send = (event: string, data: unknown) => {
+        write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+
+      // 그림 한 장에 1-2분이 걸린다. 그동안 스트림이 조용하면 휴대폰 브라우저나
+      // 중간의 프록시가 연결을 끊어 버린다(사파리에서 "Load failed"). 주기적으로
+      // 주석 한 줄을 흘려보내 연결을 살려 둔다. 클라이언트는 이 프레임을 무시한다.
+      const heartbeat = setInterval(() => write(": keep-alive\n\n"), 10_000);
 
       send("start", { conversationId, userMessageId: userMessage.id });
 
@@ -297,11 +314,15 @@ export async function POST(req: Request) {
           }
         }
       } catch (err) {
+        console.error("응답 생성 실패", err);
+        clearInterval(heartbeat);
         const message = err instanceof Error ? err.message : "응답 생성에 실패했습니다.";
         send("error", { message });
-        controller.close();
+        if (open) controller.close();
         return;
       }
+
+      clearInterval(heartbeat);
 
       // 스트림이 끊겨 클라이언트가 못 받았더라도 답변은 DB 에 남는다.
       const { data: saved } = await supabase
@@ -330,7 +351,11 @@ export async function POST(req: Request) {
         .eq("id", conversationId);
 
       send("done", { messageId: saved?.id ?? null });
-      controller.close();
+      if (open) controller.close();
+    },
+
+    cancel() {
+      // 사용자가 창을 닫았다. 그림은 계속 그려 DB 에 남긴다.
     },
   });
 
@@ -339,6 +364,8 @@ export async function POST(req: Request) {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      // 프록시가 스트림을 모아 뒀다 한꺼번에 보내면 하트비트가 소용없다.
+      "X-Accel-Buffering": "no",
     },
   });
 }

@@ -10,6 +10,24 @@ import { normalizeImage } from "@/lib/normalize-image";
 /** /admin 에 들어갈 수 있는 사람. 서버에서 한 번 더 막으므로 여기선 링크 노출용일 뿐이다. */
 const ADMINS = ["윤주호"];
 
+/**
+ * 스트림이 끊겨도 서버는 답을 끝까지 써서 DB 에 남긴다. 답이 들어올 때까지 5초마다
+ * 대화를 다시 불러 본다. 그림 세 장이면 2분까지도 걸리므로 넉넉히 기다린다.
+ */
+async function pollForAnswer(id: string) {
+  for (let i = 0; i < 40; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    const res = await fetch(`/api/conversations/${id}`).catch(() => null);
+    if (!res?.ok) continue;
+
+    const messages: Message[] = (await res.json()).messages ?? [];
+    if (messages.at(-1)?.role === "assistant") return messages;
+  }
+
+  return null;
+}
+
 type Attachment = { id: string; url: string; caption?: string | null };
 type Message = { id: string; role: string; content: string; images: Attachment[] };
 type Conversation = { id: string; title: string; updated_at: string };
@@ -28,6 +46,8 @@ export default function Chat({ username }: { username: string }) {
   const [streamImages, setStreamImages] = useState<Attachment[]>([]);
   const [drawing, setDrawing] = useState<string[] | null>(null);
   const [sending, setSending] = useState(false);
+  // 연결이 끊겨 서버가 다 쓴 답을 기다리는 중.
+  const [recovering, setRecovering] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -131,7 +151,7 @@ export default function Chat({ username }: { username: string }) {
 
   // AI 가 답하는 동안(그림을 그리는 동안도) 마이크는 잠긴다. 받아쓴 말이 다음 차례에
   // 섞여 들어가고, 아직 안 끝난 답변에 대고 말하게 되기 때문이다.
-  const micLocked = sending;
+  const micLocked = sending || recovering;
   const micLabel = drawing
     ? "그림을 그리는 동안은 말할 수 없습니다"
     : micLocked
@@ -178,6 +198,9 @@ export default function Chat({ username }: { username: string }) {
     setDrawing(null);
     setError(null);
 
+    // 새 대화면 지금 막 서버가 만들어 준 id 다. state 는 아직 이 클로저에 안 보인다.
+    let activeId = conversationId;
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -211,6 +234,7 @@ export default function Chat({ username }: { username: string }) {
           const data = JSON.parse(raw);
 
           if (event === "start") {
+            activeId = data.conversationId;
             setConversationId((prev) => prev ?? data.conversationId);
           } else if (event === "delta") {
             answer += data.text;
@@ -242,14 +266,35 @@ export default function Chat({ username }: { username: string }) {
 
       loadConversations();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "전송에 실패했습니다.");
       setStreaming(null);
       setStreamImages([]);
       setDrawing(null);
+
+      // 연결이 끊긴 것뿐이면(사파리는 이때 "Load failed" 라고만 알려준다) 서버는 아랑곳없이
+      // 답을 끝내고 DB 에 남긴다. 사용자를 놀래키지 말고, 답이 들어올 때까지 기다렸다 보여준다.
+      if (err instanceof TypeError && activeId) {
+        const id = activeId;
+        setRecovering(true);
+        setError("연결이 잠깐 끊겼습니다. 답을 이어받는 중입니다. 잠시만 기다려 주세요…");
+        pollForAnswer(id).then((list) => {
+          setRecovering(false);
+          if (!list) {
+            setError("답을 받아오지 못했습니다. 잠시 뒤 다시 보내주세요.");
+            return;
+          }
+          setConversationId(id);
+          setMessages(list);
+          setError(null);
+          loadConversations();
+        });
+      } else {
+        setError(err instanceof Error ? err.message : "전송에 실패했습니다.");
+      }
     } finally {
       setSending(false);
     }
   }
+
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     // 한글 조합 중의 엔터는 글자를 확정하는 키다. 여기서 보내면 마지막 글자가 깨진다.
@@ -475,7 +520,7 @@ export default function Chat({ username }: { username: string }) {
 
                 <button
                   onClick={send}
-                  disabled={sending || (!input.trim() && pending.length === 0)}
+                  disabled={sending || recovering || (!input.trim() && pending.length === 0)}
                   className="flex h-12 w-12 items-center justify-center rounded-full transition disabled:opacity-30"
                   style={{ background: "var(--accent)", color: "#fff" }}
                   aria-label="보내기"
