@@ -4,12 +4,13 @@ import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { supabase, signImage, IMAGE_BUCKET } from "@/lib/supabase";
 import { getSession } from "@/lib/session";
 import { openai, CHAT_MODEL, IMAGE_MODEL, DRAW_TOOL, SYSTEM_PROMPT } from "@/lib/openai";
+import { sniffImage, isDrawable } from "@/lib/image";
 
 // 자서전 한 편이 3000-5000자라 생성이 길고, 그림도 세 장을 그린다.
 export const maxDuration = 300;
 
 type Scene = { title: string; prompt: string };
-type Photo = { bytes: Buffer; mime: string };
+type Photo = { bytes: Buffer; mime: string; ext: string };
 
 function titleFrom(text: string) {
   const line = text.trim().split("\n")[0];
@@ -25,6 +26,59 @@ function drawPrompt(scene: Scene, style: string) {
     `장면: ${scene.prompt}`,
     `그림 안에 글씨, 문자, 숫자, 간판, 서명, 워터마크를 절대 넣지 마라.`,
   ].join("\n");
+}
+
+/**
+ * 얼굴 참조로 쓸 사진을 내려받는다. DB 에 적힌 mime_type 은 브라우저가 알려준 값이라
+ * 실제 내용과 다를 수 있어서, 바이트를 직접 보고 형식을 다시 정한다. 확장자와 내용이
+ * 어긋나거나 그림 모델이 못 읽는 형식이면 OpenAI 가 "Invalid image file or mode" 로 거절한다.
+ */
+async function loadPhotos(attachments: { storage_path: string }[]) {
+  const photos: Photo[] = [];
+
+  for (const attachment of attachments) {
+    const { data } = await supabase.storage.from(IMAGE_BUCKET).download(attachment.storage_path);
+    if (!data) continue;
+
+    const bytes = Buffer.from(await data.arrayBuffer());
+    const kind = sniffImage(bytes);
+
+    if (!kind || !isDrawable(kind.mime)) {
+      console.error(`그림 참조로 못 쓰는 사진: ${attachment.storage_path} (${kind?.mime ?? "unknown"})`);
+      continue;
+    }
+
+    photos.push({ bytes, mime: kind.mime, ext: kind.ext });
+  }
+
+  return photos;
+}
+
+/** 장면 하나를 그려서 스토리지에 올리고 경로를 돌려준다. */
+async function drawScene(scene: Scene, style: string, photos: Photo[], userId: string) {
+  // 파일 핸들은 요청마다 새로 만들어야 한다. 하나를 돌려 쓰면 두 번째 요청에서 비어 버린다.
+  const images = await Promise.all(
+    photos.map((photo, i) => toFile(photo.bytes, `photo-${i}.${photo.ext}`, { type: photo.mime })),
+  );
+
+  const drawing = await openai.images.edit({
+    model: IMAGE_MODEL,
+    image: images,
+    prompt: drawPrompt(scene, style),
+    size: "1024x1024",
+    quality: "medium",
+  });
+
+  const b64 = drawing.data?.[0]?.b64_json;
+  if (!b64) throw new Error("그림 모델이 이미지를 돌려주지 않았습니다.");
+
+  const path = `${userId}/gen-${crypto.randomUUID()}.png`;
+  const { error } = await supabase.storage
+    .from(IMAGE_BUCKET)
+    .upload(path, Buffer.from(b64, "base64"), { contentType: "image/png" });
+
+  if (error) throw new Error(`그림 저장 실패: ${error.message}`);
+  return path;
 }
 
 export async function POST(req: Request) {
@@ -192,67 +246,39 @@ export async function POST(req: Request) {
         const call = await run(input);
 
         if (call) {
+          // 가장 최근에 올린 사진을 얼굴 참조로 쓴다. 그림 모델이 못 읽는 형식은 여기서 걸러낸다.
+          const photos = await loadPhotos(uploaded.slice(-2));
+
           // 사진 없이 그리면 얼굴을 살릴 수 없다. 모델에게 사실대로 알리고 사진을 청하게 한다.
-          if (uploaded.length === 0) {
+          if (photos.length === 0) {
             input.push(call.item, {
               type: "function_call_output",
               call_id: call.id,
-              output: "사용자가 올린 사진이 없어 그리지 못했다. 사진을 먼저 올려달라고 청해라.",
+              output:
+                uploaded.length === 0
+                  ? "사용자가 올린 사진이 없어 그리지 못했다. 사진을 먼저 올려달라고 청해라."
+                  : "올라온 사진을 그림 모델이 읽지 못했다. png 나 jpg 사진으로 다시 올려달라고 청해라.",
             });
             await run(input);
           } else {
             send("drawing", { scenes: call.scenes.map((s) => s.title) });
 
-            // 가장 최근에 올린 사진을 얼굴 참조로 쓴다.
-            const photos: Photo[] = [];
-            for (const attachment of uploaded.slice(-2)) {
-              const { data } = await supabase.storage
-                .from(IMAGE_BUCKET)
-                .download(attachment.storage_path);
-              if (data) {
-                photos.push({
-                  bytes: Buffer.from(await data.arrayBuffer()),
-                  mime: attachment.mime_type,
-                });
-              }
-            }
+            const failed: string[] = [];
 
             // 세 장면을 한꺼번에 그린다. 순서대로 그리면 세 배로 오래 걸린다.
-            const results = await Promise.all(
+            // 한 장이 엎어져도 나머지는 살리고, 다 그려질 때까지 기다리지 않고 되는 대로 내보낸다.
+            await Promise.all(
               call.scenes.map(async (scene) => {
-                // 파일 핸들은 요청마다 새로 만들어야 한다. 하나를 돌려 쓰면 두 번째 요청에서 비어 버린다.
-                const images = await Promise.all(
-                  photos.map((photo, i) =>
-                    toFile(photo.bytes, `photo-${i}.png`, { type: photo.mime }),
-                  ),
-                );
-
-                const drawing = await openai.images.edit({
-                  model: IMAGE_MODEL,
-                  image: images,
-                  prompt: drawPrompt(scene, call.style),
-                  size: "1024x1024",
-                  quality: "medium",
-                });
-
-                const b64 = drawing.data?.[0]?.b64_json;
-                if (!b64) return null;
-
-                const path = `${session.userId}/gen-${crypto.randomUUID()}.png`;
-                const { error } = await supabase.storage
-                  .from(IMAGE_BUCKET)
-                  .upload(path, Buffer.from(b64, "base64"), { contentType: "image/png" });
-
-                if (error) return null;
-                return { path, caption: scene.title };
+                try {
+                  const path = await drawScene(scene, call.style, photos, session.userId);
+                  drawn.push({ path, caption: scene.title });
+                  send("image", { url: await signImage(path), caption: scene.title });
+                } catch (err) {
+                  console.error(`그림 실패: ${scene.title}`, err);
+                  failed.push(scene.title);
+                }
               }),
             );
-
-            for (const result of results) {
-              if (!result) continue;
-              drawn.push(result);
-              send("image", { url: await signImage(result.path), caption: result.caption });
-            }
 
             // 그림을 다 그렸다고 알려주고 마무리 말을 하게 한다.
             input.push(call.item, {
@@ -260,7 +286,11 @@ export async function POST(req: Request) {
               call_id: call.id,
               output: JSON.stringify({
                 drawn: drawn.map((d) => d.caption),
-                note: "그림은 이미 사용자 화면에 떴다. 다시 설명하지 말고, 마음에 드는지 짧게 묻기만 해라.",
+                failed,
+                note:
+                  drawn.length > 0
+                    ? "그린 그림은 이미 사용자 화면에 떴다. 다시 설명하지 말고, 마음에 드는지 짧게 묻기만 해라. failed 에 담긴 장면은 그리다 실패했으니, 있으면 그 장면만 다시 그려볼지 짧게 물어라."
+                    : "그림이 한 장도 그려지지 않았다. 사용자에게 짧게 사과하고 다시 해볼지 물어라.",
               }),
             });
             await run(input);

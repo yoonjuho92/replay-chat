@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useRealtimeTranscription } from "@/hooks/useRealtimeTranscription";
 import { parseStory } from "@/lib/story";
+import { normalizeImage } from "@/lib/normalize-image";
 
 /** /admin 에 들어갈 수 있는 사람. 서버에서 한 번 더 막으므로 여기선 링크 노출용일 뿐이다. */
 const ADMINS = ["윤주호"];
@@ -117,7 +118,8 @@ export default function Chat({ username }: { username: string }) {
 
     for (const file of Array.from(files)) {
       const form = new FormData();
-      form.append("file", file);
+      // 휴대폰이 heic 로 저장한 사진은 그림 모델이 못 읽는다. 올리기 전에 jpg 로 맞춘다.
+      form.append("file", await normalizeImage(file));
       const res = await fetch("/api/upload", { method: "POST", body: form });
       const data = await res.json();
       if (res.ok) setPending((prev) => [...prev, { id: data.id, url: data.url }]);
@@ -433,7 +435,7 @@ export default function Chat({ username }: { username: string }) {
               <input
                 ref={fileInput}
                 type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
+                accept="image/*"
                 multiple
                 hidden
                 onChange={(e) => {
@@ -653,6 +655,16 @@ function Bubble({ message }: { message: Message }) {
   );
 }
 
+/**
+ * 서명 URL 은 우리 도메인이 아니라서 <a download> 만으로는 저장이 안 되고 새 탭으로 열린다.
+ * Supabase 는 download 쿼리를 붙이면 첨부 파일로 내려보내 준다.
+ */
+function downloadUrl(img: Attachment) {
+  const name = (img.caption ?? "그림").replace(/[\\/:*?"<>|]/g, " ").trim() || "그림";
+  const sep = img.url.includes("?") ? "&" : "?";
+  return `${img.url}${sep}download=${encodeURIComponent(`${name}.png`)}`;
+}
+
 function Images({ images }: { images: Attachment[] }) {
   if (images.length === 0) return null;
 
@@ -667,14 +679,34 @@ function Images({ images }: { images: Attachment[] }) {
             className="w-full rounded-2xl border object-cover"
             style={{ borderColor: "var(--border)" }}
           />
-          {img.caption && (
-            <figcaption
-              className="mt-2 px-1 text-[15px] leading-snug"
-              style={{ color: "var(--muted)" }}
-            >
+          <figcaption className="mt-2 flex items-start justify-between gap-3 px-1">
+            <span className="text-[15px] leading-snug" style={{ color: "var(--muted)" }}>
               {img.caption}
-            </figcaption>
-          )}
+            </span>
+            <a
+              href={downloadUrl(img)}
+              download
+              className="flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[14px] font-medium transition hover:bg-white/5"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M5 21h14" />
+              </svg>
+              저장
+            </a>
+          </figcaption>
         </figure>
       ))}
     </div>
