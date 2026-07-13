@@ -1,9 +1,12 @@
-import { guardAdmin } from "@/lib/admin";
-import PasswordForm from "@/components/PasswordForm";
+import { supabase } from "@/lib/supabase";
+import AdminPasswordForm from "@/components/AdminPasswordForm";
 
 export default async function AdminPasswordPage() {
-  // 여기 오기 전에 layout 이 이미 관리자인지 확인했다.
-  const guard = await guardAdmin();
+  // 여기 오기 전에 admin layout 이 이미 관리자인지 확인했다.
+  const { data } = await supabase
+    .from("users")
+    .select("id, username")
+    .order("created_at", { ascending: true });
 
-  return <PasswordForm username={guard.ok ? guard.username : ""} />;
+  return <AdminPasswordForm users={data ?? []} />;
 }

@@ -14,143 +14,195 @@ type Row = {
   }[];
 };
 
+type Image = { id: string; url: string };
+type Story = { text: string; at: string; sortKey: string };
+
+async function sign(list: { id: string; storage_path: string }[]): Promise<Image[]> {
+  const signed = await Promise.all(
+    list.map(async (a) => ({ id: a.id, url: await signImage(a.storage_path) })),
+  );
+  return signed.filter((a): a is Image => Boolean(a.url));
+}
+
+const when = (iso: string) =>
+  new Date(iso).toLocaleString("ko-KR", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
 export default async function AdminPage() {
   const { data } = await supabase
     .from("conversations")
     .select(
       "id, title, updated_at, users(username), messages(role, content, created_at, attachments(id, storage_path))",
     )
-    .order("updated_at", { ascending: false })
     .overrideTypes<Row[]>();
 
   const sessions = await Promise.all(
     (data ?? []).map(async (conversation) => {
-      const messages = [...conversation.messages].sort((a, b) =>
-        a.created_at.localeCompare(b.created_at),
-      );
+      const messages = conversation.messages ?? [];
+      const answers = messages.filter((m) => m.role === "assistant");
 
-      const stories = messages
-        .filter((m) => m.role === "assistant")
-        .flatMap((m) => extractStories(m.content));
-
-      // AI 가 그린 그림은 어시스턴트 답변에 매달려 있고, 사용자가 올린 사진은 사용자 메시지에 매달려 있다.
-      const drawn = messages
-        .filter((m) => m.role === "assistant")
-        .flatMap((m) => m.attachments ?? []);
-      const uploaded = messages
-        .filter((m) => m.role === "user")
-        .flatMap((m) => m.attachments ?? []);
-
-      const sign = async (list: { id: string; storage_path: string }[]) =>
-        (
-          await Promise.all(
-            list.map(async (a) => ({ id: a.id, url: await signImage(a.storage_path) })),
-          )
-        ).filter((a): a is { id: string; url: string } => Boolean(a.url));
+      // 한 세션에서 이야기를 여러 번 고쳐 쓸 수 있다. 늦게 쓴 것이 위로 온다.
+      const stories: Story[] = answers
+        .flatMap((m) =>
+          extractStories(m.content).map((text) => ({
+            text,
+            at: when(m.created_at),
+            sortKey: m.created_at,
+          })),
+        )
+        .sort((a, b) => b.sortKey.localeCompare(a.sortKey));
 
       return {
         id: conversation.id,
         title: conversation.title,
         username: conversation.users?.username ?? "알 수 없음",
-        updatedAt: new Date(conversation.updated_at).toLocaleString("ko-KR"),
+        updatedAt: conversation.updated_at,
         stories,
-        drawn: await sign(drawn),
-        uploaded: await sign(uploaded),
+        // AI 가 그린 그림은 답변에, 사용자가 올린 사진은 사용자 메시지에 매달려 있다.
+        drawn: await sign(answers.flatMap((m) => m.attachments ?? [])),
+        uploaded: await sign(
+          messages.filter((m) => m.role === "user").flatMap((m) => m.attachments ?? []),
+        ),
       };
     }),
   );
 
   const withContent = sessions.filter((s) => s.stories.length > 0 || s.drawn.length > 0);
 
+  // 사용자별로 묶고, 사용자도 세션도 최근 것이 먼저 오게 한다.
+  const users = [...new Set(withContent.map((s) => s.username))]
+    .map((username) => {
+      const own = withContent
+        .filter((s) => s.username === username)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+
+      return {
+        username,
+        sessions: own,
+        latest: own[0]?.updatedAt ?? "",
+        storyCount: own.reduce((n, s) => n + s.stories.length, 0),
+        drawnCount: own.reduce((n, s) => n + s.drawn.length, 0),
+      };
+    })
+    .sort((a, b) => b.latest.localeCompare(a.latest));
+
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-8">
       <h1 className="text-2xl font-semibold tracking-tight">이야기 모아보기</h1>
       <p className="mt-2 text-[16px]" style={{ color: "var(--muted)" }}>
-        대화 {sessions.length}개 중 이야기나 그림이 나온 건 {withContent.length}개입니다.
+        최근에 만든 것이 가장 위에 옵니다.
       </p>
 
-      {withContent.length === 0 && (
-        <p className="mt-16 text-center text-[17px]" style={{ color: "var(--muted)" }}>
-          아직 완성된 이야기가 없습니다.
+      {users.length === 0 && (
+        <p className="mt-20 text-center text-[17px]" style={{ color: "var(--muted)" }}>
+          아직 만들어진 이야기가 없습니다.
         </p>
       )}
 
-      <div className="mt-8 space-y-6">
-        {withContent.map((session) => (
-          <section
-            key={session.id}
-            className="overflow-hidden rounded-2xl border"
-            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-          >
+      <div className="mt-8 space-y-12">
+        {users.map((user) => (
+          <section key={user.username}>
             <header
-              className="border-b px-5 py-4"
-              style={{ borderColor: "var(--border)" }}
+              className="sticky top-0 z-10 flex items-baseline gap-3 border-b py-3"
+              style={{ borderColor: "var(--border)", background: "var(--bg)" }}
             >
-              <h2 className="text-[18px] font-semibold">{session.title}</h2>
-              <p className="mt-1 text-[14px]" style={{ color: "var(--muted)" }}>
-                {session.username} · {session.updatedAt} · 이야기 {session.stories.length}편 ·
-                그림 {session.drawn.length}장
-              </p>
+              <h2 className="text-[20px] font-semibold">{user.username}</h2>
+              <span className="text-[14px]" style={{ color: "var(--muted)" }}>
+                이야기 {user.storyCount}편 · 그림 {user.drawnCount}장 · 세션{" "}
+                {user.sessions.length}개
+              </span>
             </header>
 
-            {session.stories.map((story, i) => (
-              <article
-                key={i}
-                className="border-b px-5 py-5"
-                style={{ borderColor: "var(--border)" }}
-              >
-                <div
-                  className="mb-3 flex items-center gap-2 text-[14px] font-semibold"
-                  style={{ color: "var(--accent)" }}
+            <div className="mt-5 space-y-5">
+              {user.sessions.map((session) => (
+                <section
+                  key={session.id}
+                  className="overflow-hidden rounded-2xl border"
+                  style={{ borderColor: "var(--border)", background: "var(--surface)" }}
                 >
-                  이야기 {i + 1} · {[...story].length.toLocaleString()}자
-                </div>
-                <p className="text-[17px] leading-[1.95] whitespace-pre-wrap">{story}</p>
-              </article>
-            ))}
+                  <header className="border-b px-5 py-4" style={{ borderColor: "var(--border)" }}>
+                    <h3 className="text-[18px] font-semibold">{session.title}</h3>
+                    <p className="mt-1 text-[14px]" style={{ color: "var(--muted)" }}>
+                      {when(session.updatedAt)} · 이야기 {session.stories.length}편 · 그림{" "}
+                      {session.drawn.length}장
+                    </p>
+                  </header>
 
-            {session.drawn.length > 0 && (
-              <div className="border-b px-5 py-5" style={{ borderColor: "var(--border)" }}>
-                <div
-                  className="mb-3 text-[14px] font-semibold"
-                  style={{ color: "var(--accent)" }}
-                >
-                  이 대화에서 그린 그림
-                </div>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                  {session.drawn.map((img) => (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      key={img.id}
-                      src={img.url}
-                      alt="AI 가 그린 그림"
-                      className="aspect-square w-full rounded-xl border object-cover"
+                  {session.stories.map((story, i) => (
+                    <article
+                      key={story.sortKey + i}
+                      className="border-b px-5 py-5"
                       style={{ borderColor: "var(--border)" }}
-                    />
+                    >
+                      <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                        <span
+                          className="text-[14px] font-semibold"
+                          style={{ color: "var(--accent)" }}
+                        >
+                          {i === 0 && session.stories.length > 1
+                            ? "가장 최근 이야기"
+                            : `이야기 ${session.stories.length - i}`}
+                        </span>
+                        <span className="text-[13px]" style={{ color: "var(--muted)" }}>
+                          {story.at} · {[...story.text].length.toLocaleString()}자
+                        </span>
+                      </div>
+                      <p className="text-[17px] leading-[1.95] whitespace-pre-wrap">
+                        {story.text}
+                      </p>
+                    </article>
                   ))}
-                </div>
-              </div>
-            )}
 
-            {session.uploaded.length > 0 && (
-              <div className="px-5 py-4">
-                <div className="mb-3 text-[14px]" style={{ color: "var(--muted)" }}>
-                  올린 사진
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {session.uploaded.map((img) => (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      key={img.id}
-                      src={img.url}
-                      alt="사용자가 올린 사진"
-                      className="h-20 w-20 rounded-lg border object-cover"
-                      style={{ borderColor: "var(--border)" }}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
+                  {session.drawn.length > 0 && (
+                    <div className="border-b px-5 py-5" style={{ borderColor: "var(--border)" }}>
+                      <div
+                        className="mb-3 text-[14px] font-semibold"
+                        style={{ color: "var(--accent)" }}
+                      >
+                        이 세션에서 그린 그림
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                        {session.drawn.map((img) => (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            key={img.id}
+                            src={img.url}
+                            alt="AI 가 그린 그림"
+                            className="aspect-square w-full rounded-xl border object-cover"
+                            style={{ borderColor: "var(--border)" }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {session.uploaded.length > 0 && (
+                    <div className="px-5 py-4">
+                      <div className="mb-3 text-[14px]" style={{ color: "var(--muted)" }}>
+                        올린 사진
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {session.uploaded.map((img) => (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            key={img.id}
+                            src={img.url}
+                            alt="사용자가 올린 사진"
+                            className="h-20 w-20 rounded-lg border object-cover"
+                            style={{ borderColor: "var(--border)" }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </section>
+              ))}
+            </div>
           </section>
         ))}
       </div>
