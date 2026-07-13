@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useRealtimeTranscription } from "@/hooks/useRealtimeTranscription";
+import { parseStory } from "@/lib/story";
+
+/** /admin 에 들어갈 수 있는 사람. 서버에서 한 번 더 막으므로 여기선 링크 노출용일 뿐이다. */
+const ADMINS = ["윤주호"];
 
 type Attachment = { id: string; url: string };
 type Message = { id: string; role: string; content: string; images: Attachment[] };
@@ -19,17 +24,19 @@ export default function Chat({ username }: { username: string }) {
   const [input, setInput] = useState("");
   const [pending, setPending] = useState<Attachment[]>([]);
   const [streaming, setStreaming] = useState<string | null>(null);
+  const [streamImages, setStreamImages] = useState<Attachment[]>([]);
+  const [drawing, setDrawing] = useState(false);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [recording, setRecording] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fileInput = useRef<HTMLInputElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
-  const recorder = useRef<MediaRecorder | null>(null);
-  const chunks = useRef<Blob[]>([]);
+
+  const mic = useRealtimeTranscription();
+  // 녹음을 시작한 순간 이미 입력창에 있던 글. 받아쓰는 말은 이 뒤에 붙는다.
+  const beforeMic = useRef("");
 
   const loadConversations = useCallback(async () => {
     const res = await fetch("/api/conversations");
@@ -37,6 +44,8 @@ export default function Chat({ username }: { username: string }) {
   }, []);
 
   useEffect(() => {
+    // 화면에 처음 들어왔을 때 지난 이야기 목록을 받아온다.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadConversations();
   }, [loadConversations]);
 
@@ -58,6 +67,16 @@ export default function Chat({ username }: { username: string }) {
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
   }, [input]);
+
+  // 말하는 동안 받아쓴 글이 입력창에 실시간으로 차오른다.
+  // 전송은 여전히 사용자가 엔터를 눌러야만 일어난다.
+  useEffect(() => {
+    if (!mic.recording && !mic.connecting) return;
+
+    const before = beforeMic.current;
+    const spoken = mic.transcript;
+    setInput(before && spoken ? `${before} ${spoken}` : before || spoken);
+  }, [mic.transcript, mic.recording, mic.connecting]);
 
   async function openConversation(id: string) {
     setDrawerOpen(false);
@@ -108,54 +127,22 @@ export default function Chat({ username }: { username: string }) {
     setUploading(false);
   }
 
-  async function startRecording() {
-    setError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream);
-      chunks.current = [];
-
-      mr.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.current.push(e.data);
-      };
-
-      mr.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunks.current, { type: mr.mimeType || "audio/webm" });
-        if (blob.size === 0) return;
-
-        setTranscribing(true);
-        const form = new FormData();
-        form.append("audio", new File([blob], "recording.webm", { type: blob.type }));
-
-        const res = await fetch("/api/transcribe", { method: "POST", body: form });
-        const data = await res.json();
-        setTranscribing(false);
-
-        if (!res.ok) {
-          setError(data.error ?? "음성 인식에 실패했습니다.");
-          return;
-        }
-        // 바로 보내지 않는다. 입력창에 넣어두고 사용자가 확인한 뒤 엔터를 눌러야 전송된다.
-        setInput((prev) => (prev ? `${prev} ${data.text}` : data.text));
-        textarea.current?.focus();
-      };
-
-      mr.start();
-      recorder.current = mr;
-      setRecording(true);
-    } catch {
-      setError("마이크를 사용할 수 없습니다. 브라우저 권한을 확인해주세요.");
+  function toggleMic() {
+    if (mic.recording || mic.connecting) {
+      mic.stop();
+      textarea.current?.focus();
+      return;
     }
-  }
 
-  function stopRecording() {
-    recorder.current?.stop();
-    recorder.current = null;
-    setRecording(false);
+    setError(null);
+    beforeMic.current = input.trim();
+    mic.start();
   }
 
   async function send() {
+    // 보내는 순간 마이크는 꺼진다. 안 그러면 보낸 뒤에도 계속 받아써서 입력창에 다시 쌓인다.
+    if (mic.recording || mic.connecting) mic.stop();
+
     const text = input.trim();
     if ((!text && pending.length === 0) || sending) return;
 
@@ -172,6 +159,8 @@ export default function Chat({ username }: { username: string }) {
     setPending([]);
     setSending(true);
     setStreaming("");
+    setStreamImages([]);
+    setDrawing(false);
     setError(null);
 
     try {
@@ -190,6 +179,7 @@ export default function Chat({ username }: { username: string }) {
       const decoder = new TextDecoder();
       let buffer = "";
       let answer = "";
+      const drawn: Attachment[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -210,6 +200,12 @@ export default function Chat({ username }: { username: string }) {
           } else if (event === "delta") {
             answer += data.text;
             setStreaming(answer);
+          } else if (event === "drawing") {
+            setDrawing(true);
+          } else if (event === "image") {
+            drawn.push({ id: `drawn-${drawn.length}`, url: data.url });
+            setStreamImages([...drawn]);
+            setDrawing(false);
           } else if (event === "error") {
             throw new Error(data.message);
           } else if (event === "done") {
@@ -219,10 +215,12 @@ export default function Chat({ username }: { username: string }) {
                 id: data.messageId ?? `local-a-${Date.now()}`,
                 role: "assistant",
                 content: answer,
-                images: [],
+                images: drawn,
               },
             ]);
             setStreaming(null);
+            setStreamImages([]);
+            setDrawing(false);
           }
         }
       }
@@ -231,6 +229,8 @@ export default function Chat({ username }: { username: string }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "전송에 실패했습니다.");
       setStreaming(null);
+      setStreamImages([]);
+      setDrawing(false);
     } finally {
       setSending(false);
     }
@@ -287,6 +287,7 @@ export default function Chat({ username }: { username: string }) {
         onDelete={deleteConversation}
         onNew={newConversation}
         username={username}
+        admin={ADMINS.includes(username)}
         onLogout={logout}
       />
 
@@ -317,11 +318,26 @@ export default function Chat({ username }: { username: string }) {
               ))}
 
               {streaming !== null && (
-                <div className="text-[19px] leading-[2.05] whitespace-pre-wrap">
-                  {streaming || (
-                    <span style={{ color: "var(--muted)" }}>이야기를 쓰는 중…</span>
+                <div className="space-y-4">
+                  {streaming ? (
+                    <AssistantBody content={streaming} streaming />
+                  ) : (
+                    <p className="text-[19px]" style={{ color: "var(--muted)" }}>
+                      이야기를 쓰는 중…
+                    </p>
                   )}
-                  {streaming && <span className="caret">▍</span>}
+
+                  <Images images={streamImages} />
+
+                  {drawing && (
+                    <p
+                      className="flex items-center gap-2 text-[17px]"
+                      style={{ color: "var(--muted)" }}
+                    >
+                      <Spinner />
+                      그림을 그리는 중…
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -334,9 +350,19 @@ export default function Chat({ username }: { username: string }) {
       {/* 입력창 */}
       <div className="shrink-0 px-3 pb-4 pt-1">
         <div className="mx-auto w-full max-w-3xl">
-          {error && (
+          {(error ?? mic.error) && (
             <p className="mb-2 px-1 text-[16px]" style={{ color: "var(--accent)" }}>
-              {error}
+              {error ?? mic.error}
+            </p>
+          )}
+
+          {mic.recording && (
+            <p
+              className="mb-2 flex items-center gap-2 px-1 text-[15px]"
+              style={{ color: "var(--accent)" }}
+            >
+              <span className="recording flex h-2.5 w-2.5 rounded-full bg-[var(--accent)]" />
+              듣고 있습니다. 말이 끝나면 마이크를 다시 눌러주세요.
             </p>
           )}
 
@@ -369,7 +395,13 @@ export default function Chat({ username }: { username: string }) {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
               rows={1}
-              placeholder={transcribing ? "말씀하신 내용을 옮기는 중…" : "이야기를 들려주세요…"}
+              placeholder={
+                mic.connecting
+                  ? "마이크를 켜는 중…"
+                  : mic.recording
+                    ? "말씀하세요. 듣고 있습니다…"
+                    : "이야기를 들려주세요…"
+              }
               className="w-full resize-none bg-transparent px-1 py-2 text-[18px] leading-relaxed outline-none placeholder:text-[var(--muted)]"
             />
 
@@ -401,20 +433,19 @@ export default function Chat({ username }: { username: string }) {
               {/* 우하단: 마이크 + 보내기 */}
               <div className="flex items-center gap-2">
                 <button
-                  onClick={recording ? stopRecording : startRecording}
-                  disabled={transcribing}
-                  className={`flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-white/5 disabled:opacity-40 ${
-                    recording ? "recording" : ""
+                  onClick={toggleMic}
+                  className={`flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-white/5 ${
+                    mic.recording ? "recording" : ""
                   }`}
                   style={{
-                    borderColor: recording ? "var(--accent)" : "var(--border)",
-                    background: recording ? "var(--accent)" : undefined,
-                    color: recording ? "#fff" : "var(--muted)",
+                    borderColor: mic.recording ? "var(--accent)" : "var(--border)",
+                    background: mic.recording ? "var(--accent)" : undefined,
+                    color: mic.recording ? "#fff" : "var(--muted)",
                   }}
-                  aria-label={recording ? "녹음 끝내기" : "음성으로 말하기"}
-                  title={recording ? "녹음 끝내기" : "음성으로 말하기"}
+                  aria-label={mic.recording ? "말 그만하기" : "음성으로 말하기"}
+                  title={mic.recording ? "말 그만하기" : "음성으로 말하기"}
                 >
-                  {transcribing ? <Spinner /> : recording ? <StopIcon /> : <MicIcon />}
+                  {mic.connecting ? <Spinner /> : mic.recording ? <StopIcon /> : <MicIcon />}
                 </button>
 
                 <button
@@ -448,6 +479,7 @@ function Drawer({
   onDelete,
   onNew,
   username,
+  admin,
   onLogout,
 }: {
   open: boolean;
@@ -458,6 +490,7 @@ function Drawer({
   onDelete: (id: string, e: React.MouseEvent) => void;
   onNew: () => void;
   username: string;
+  admin: boolean;
   onLogout: () => void;
 }) {
   return (
@@ -530,14 +563,16 @@ function Drawer({
         </nav>
 
         <div className="border-t p-2" style={{ borderColor: "var(--border)" }}>
-          <Link
-            href="/settings"
-            className="flex items-center gap-3 rounded-lg px-3 py-3 text-[17px] transition hover:bg-white/5"
-            style={{ color: "var(--text)" }}
-          >
-            <KeyIcon />
-            비밀번호 바꾸기
-          </Link>
+          {admin && (
+            <Link
+              href="/admin"
+              className="flex items-center gap-3 rounded-lg px-3 py-3 text-[17px] transition hover:bg-white/5"
+              style={{ color: "var(--text)" }}
+            >
+              <KeyIcon />
+              관리자
+            </Link>
+          )}
 
           <div
             className="mt-1 flex items-center justify-between px-3 py-2 text-[15px]"
@@ -585,7 +620,141 @@ function Bubble({ message }: { message: Message }) {
     );
   }
 
-  return <div className="text-[19px] leading-[2.05] whitespace-pre-wrap">{message.content}</div>;
+  return (
+    <div className="space-y-4">
+      <AssistantBody content={message.content} />
+      <Images images={message.images} />
+    </div>
+  );
+}
+
+function Images({ images }: { images: Attachment[] }) {
+  if (images.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {images.map((img) => (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          key={img.id}
+          src={img.url}
+          alt="AI 가 그린 그림"
+          className="max-h-[420px] w-full max-w-md rounded-2xl border object-cover"
+          style={{ borderColor: "var(--border)" }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** 글자가 한 자씩 들어오는 동안 "<sto" 같은 반쪽 태그가 화면에 보이지 않게 잘라낸다. */
+function trimPartialTag(text: string) {
+  const cut = text.lastIndexOf("<");
+  if (cut === -1) return text;
+
+  const tail = text.slice(cut);
+  const isPartial = "<story>".startsWith(tail) || "</story>".startsWith(tail);
+  return isPartial ? text.slice(0, cut) : text;
+}
+
+function AssistantBody({ content, streaming }: { content: string; streaming?: boolean }) {
+  const segments = parseStory(content);
+
+  return (
+    <div className="space-y-4">
+      {segments.map((segment, i) => {
+        const last = i === segments.length - 1;
+        const text = streaming && last ? trimPartialTag(segment.text) : segment.text;
+        const caret = streaming && last ? <span className="caret">▍</span> : null;
+
+        if (segment.kind === "story") {
+          return (
+            <StoryBox key={i} text={text.trim()} writing={Boolean(streaming && last && segment.open)}>
+              {caret}
+            </StoryBox>
+          );
+        }
+
+        return (
+          <div key={i} className="text-[19px] leading-[2.05] whitespace-pre-wrap">
+            {text.trim()}
+            {caret}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function StoryBox({
+  text,
+  writing,
+  children,
+}: {
+  text: string;
+  writing: boolean;
+  children?: React.ReactNode;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <article
+      className="overflow-hidden rounded-2xl border"
+      style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+    >
+      <header
+        className="flex items-center justify-between border-b px-5 py-3"
+        style={{ borderColor: "var(--border)" }}
+      >
+        <span
+          className="flex items-center gap-2 text-[15px] font-semibold"
+          style={{ color: "var(--accent)" }}
+        >
+          <BookIcon />
+          {writing ? "이야기를 쓰는 중…" : "당신의 이야기"}
+        </span>
+
+        {!writing && text.length > 0 && (
+          <button
+            onClick={copy}
+            className="rounded-lg px-2.5 py-1.5 text-[14px] transition hover:bg-white/5"
+            style={{ color: "var(--muted)" }}
+          >
+            {copied ? "복사했어요" : "복사"}
+          </button>
+        )}
+      </header>
+
+      <div className="px-5 py-5 text-[19px] leading-[2.1] whitespace-pre-wrap">
+        {text}
+        {children}
+      </div>
+
+      {!writing && text.length > 0 && (
+        <footer
+          className="border-t px-5 py-2.5 text-[14px]"
+          style={{ borderColor: "var(--border)", color: "var(--muted)" }}
+        >
+          {[...text].length.toLocaleString()}자
+        </footer>
+      )}
+    </article>
+  );
+}
+
+function BookIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 19.5V5a2 2 0 0 1 2-2h13v18H6.5A2.5 2.5 0 0 1 4 18.5Z" />
+      <path d="M8 7h7M8 11h7" />
+    </svg>
+  );
 }
 
 function KeyIcon() {

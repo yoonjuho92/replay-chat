@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 시크릿이 없는 템플릿은 올린다
+!.env.example

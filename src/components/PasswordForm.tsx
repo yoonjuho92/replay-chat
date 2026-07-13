@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 export default function PasswordForm({ username }: { username: string }) {
@@ -47,26 +46,6 @@ export default function PasswordForm({ username }: { username: string }) {
   const fieldStyle = { background: "var(--elevated)", borderColor: "var(--border)" };
 
   return (
-    <div className="flex min-h-dvh flex-col">
-      <header
-        className="flex h-14 shrink-0 items-center gap-2 border-b px-2"
-        style={{ borderColor: "var(--border)" }}
-      >
-        <Link
-          href="/"
-          className="flex h-11 w-11 items-center justify-center rounded-lg transition hover:bg-white/5"
-          aria-label="채팅으로 돌아가기"
-        >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
-        </Link>
-        <h1 className="min-w-0 flex-1 truncate text-center text-[17px] font-medium">
-          비밀번호 바꾸기
-        </h1>
-        <div className="h-11 w-11" />
-      </header>
-
       <main className="flex flex-1 justify-center px-5 py-10">
         <form onSubmit={onSubmit} className="w-full max-w-sm">
           <p className="text-[17px]" style={{ color: "var(--muted)" }}>
@@ -134,6 +113,5 @@ export default function PasswordForm({ username }: { username: string }) {
           </button>
         </form>
       </main>
-    </div>
   );
 }

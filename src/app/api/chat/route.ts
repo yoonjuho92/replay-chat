@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
-import { supabase, signImage } from "@/lib/supabase";
+import { supabase, signImage, IMAGE_BUCKET } from "@/lib/supabase";
 import { getSession } from "@/lib/session";
-import { openai, CHAT_MODEL, SYSTEM_PROMPT } from "@/lib/openai";
+import { openai, CHAT_MODEL, IMAGE_MODEL, SYSTEM_PROMPT } from "@/lib/openai";
 
 // 자서전 한 편이 3000-5000자라 생성이 길다. 기본 제한으로는 잘린다.
 export const maxDuration = 300;
@@ -77,21 +77,39 @@ export async function POST(req: Request) {
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true });
 
+  // 버킷이 private 이라 OpenAI 가 URL 을 직접 못 읽는다. 짧게 유효한 서명 URL 을 넘긴다.
+  const asImages = async (attachments: { storage_path: string }[]) => {
+    const parts: ResponseInputItem.Message["content"] = [];
+    for (const attachment of attachments) {
+      const url = await signImage(attachment.storage_path, 60 * 10);
+      if (url) parts.push({ type: "input_image", image_url: url, detail: "auto" });
+    }
+    return parts;
+  };
+
   const input: ResponseInputItem[] = [];
   for (const message of history ?? []) {
+    const attachments = message.attachments ?? [];
+
     if (message.role === "assistant") {
       input.push({ role: "assistant", content: message.content });
+
+      // 전에 그린 그림을 다시 보여줘야 "그거 색만 바꿔줘" 같은 이어지는 요청을 받을 수 있다.
+      if (attachments.length > 0) {
+        input.push({
+          role: "user",
+          content: [
+            { type: "input_text", text: "(바로 위 답변에서 네가 그린 그림이다.)" },
+            ...(await asImages(attachments)),
+          ],
+        });
+      }
       continue;
     }
 
     const content: ResponseInputItem.Message["content"] = [];
     if (message.content) content.push({ type: "input_text", text: message.content });
-
-    for (const attachment of message.attachments ?? []) {
-      // 버킷이 private 이라 OpenAI 가 직접 못 읽는다. 짧게 유효한 서명 URL 을 넘긴다.
-      const url = await signImage(attachment.storage_path, 60 * 10);
-      if (url) content.push({ type: "input_image", image_url: url, detail: "auto" });
-    }
+    content.push(...(await asImages(attachments)));
 
     if (content.length > 0) input.push({ role: "user", content });
   }
@@ -106,11 +124,15 @@ export async function POST(req: Request) {
       send("start", { conversationId, userMessageId: userMessage.id });
 
       let answer = "";
+      const drawn: string[] = [];
+
       try {
         const events = await openai.responses.create({
           model: CHAT_MODEL,
           instructions: SYSTEM_PROMPT,
           input,
+          // 대화에 올라온 사진이 그대로 참조 이미지가 된다. 모델이 필요할 때 알아서 부른다.
+          tools: [{ type: "image_generation", model: IMAGE_MODEL, size: "auto", quality: "medium" }],
           stream: true,
         });
 
@@ -118,6 +140,30 @@ export async function POST(req: Request) {
           if (event.type === "response.output_text.delta") {
             answer += event.delta;
             send("delta", { text: event.delta });
+          } else if (event.type === "response.output_text.done") {
+            // 델타 없이 완성 텍스트만 오는 경우가 있어 비어 있을 때만 채운다.
+            if (!answer) {
+              answer = event.text;
+              send("delta", { text: event.text });
+            }
+          } else if (event.type === "response.image_generation_call.generating") {
+            send("drawing", {});
+          } else if (
+            event.type === "response.output_item.done" &&
+            event.item.type === "image_generation_call" &&
+            event.item.result
+          ) {
+            const path = `${session.userId}/gen-${crypto.randomUUID()}.png`;
+            const { error } = await supabase.storage
+              .from(IMAGE_BUCKET)
+              .upload(path, Buffer.from(event.item.result, "base64"), {
+                contentType: "image/png",
+              });
+
+            if (!error) {
+              drawn.push(path);
+              send("image", { url: await signImage(path) });
+            }
           } else if (event.type === "response.failed" || event.type === "error") {
             throw new Error("모델 응답이 실패했습니다.");
           }
@@ -135,6 +181,19 @@ export async function POST(req: Request) {
         .insert({ conversation_id: conversationId, role: "assistant", content: answer })
         .select("id")
         .single();
+
+      // 그린 그림도 그 답변에 매달아 둬야 다음에 대화를 열었을 때 같이 뜬다.
+      if (saved && drawn.length > 0) {
+        await supabase.from("attachments").insert(
+          drawn.map((path) => ({
+            message_id: saved.id,
+            conversation_id: conversationId,
+            user_id: session.userId,
+            storage_path: path,
+            mime_type: "image/png",
+          })),
+        );
+      }
 
       await supabase
         .from("conversations")
