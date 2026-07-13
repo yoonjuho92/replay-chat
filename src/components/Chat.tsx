@@ -11,18 +11,51 @@ import { normalizeImage } from "@/lib/normalize-image";
 const ADMINS = ["윤주호"];
 
 /**
+ * 답을 기다리는 중이라는 표시. 다른 탭에 갔다 오는 사이 브라우저가 이 탭을 통째로
+ * 버리고 새로 띄우는 일이 있어서(특히 아이폰), 무엇을 기다리던 중이었는지 남겨 둔다.
+ */
+const PENDING_KEY = "replay-chat:pending";
+type Pending = { id: string; answer: string; scenes: string[] | null };
+
+function savePending(pending: Pending) {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+  } catch {
+    // 사파리 사생활 보호 모드 같은 데선 저장이 막힌다. 없어도 그만이다.
+  }
+}
+
+function readPending(): Pending | null {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    return raw ? (JSON.parse(raw) as Pending) : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearPending() {
+  try {
+    localStorage.removeItem(PENDING_KEY);
+  } catch {
+    // 지울 게 없으면 그만이다.
+  }
+}
+
+/**
  * 스트림이 끊겨도 서버는 답을 끝까지 써서 DB 에 남긴다. 답이 들어올 때까지 5초마다
  * 대화를 다시 불러 본다. 그림 세 장이면 2분까지도 걸리므로 넉넉히 기다린다.
  */
 async function pollForAnswer(id: string) {
   for (let i = 0; i < 40; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-
     const res = await fetch(`/api/conversations/${id}`).catch(() => null);
-    if (!res?.ok) continue;
 
-    const messages: Message[] = (await res.json()).messages ?? [];
-    if (messages.at(-1)?.role === "assistant") return messages;
+    if (res?.ok) {
+      const messages: Message[] = (await res.json()).messages ?? [];
+      if (messages.at(-1)?.role === "assistant") return messages;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 5000));
   }
 
   return null;
@@ -51,6 +84,9 @@ export default function Chat({ username }: { username: string }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 기다리던 답이 늦게 도착했을 때, 그 사이 사용자가 다른 이야기를 열었으면 앉히면 안 된다.
+  const viewing = useRef<string | null>(null);
+
   const fileInput = useRef<HTMLInputElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
@@ -68,6 +104,44 @@ export default function Chat({ username }: { username: string }) {
     // 화면에 처음 들어왔을 때 지난 이야기 목록을 받아온다.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadConversations();
+  }, [loadConversations]);
+
+  useEffect(() => {
+    // 그림을 그리는 사이 다른 탭에 다녀오면 브라우저가 이 탭을 버렸다 새로 띄우기도 한다.
+    // 서버는 아랑곳없이 계속 그리고 있으니, 그리던 화면을 되살리고 답이 들어오길 기다린다.
+    const pending = readPending();
+    if (!pending) return;
+
+    viewing.current = pending.id;
+
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setConversationId(pending.id);
+    setStreaming(pending.answer);
+    setDrawing(pending.scenes);
+    setRecovering(true);
+    /* eslint-enable react-hooks/set-state-in-effect */
+
+    fetch(`/api/conversations/${pending.id}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setMessages(data?.messages ?? []))
+      .catch(() => {});
+
+    pollForAnswer(pending.id).then((list) => {
+      clearPending();
+      if (viewing.current !== pending.id) return;
+
+      setRecovering(false);
+      setStreaming(null);
+      setStreamImages([]);
+      setDrawing(null);
+
+      if (!list) {
+        setError("답을 받아오지 못했습니다. 잠시 뒤 다시 보내주세요.");
+        return;
+      }
+      setMessages(list);
+      loadConversations();
+    });
   }, [loadConversations]);
 
   useEffect(() => {
@@ -100,6 +174,7 @@ export default function Chat({ username }: { username: string }) {
   }, [mic.transcript, mic.recording, mic.connecting]);
 
   async function openConversation(id: string) {
+    viewing.current = id;
     setDrawerOpen(false);
     setConversationId(id);
     setError(null);
@@ -109,6 +184,7 @@ export default function Chat({ username }: { username: string }) {
   }
 
   function newConversation() {
+    viewing.current = null;
     setDrawerOpen(false);
     setConversationId(null);
     setMessages([]);
@@ -116,6 +192,9 @@ export default function Chat({ username }: { username: string }) {
     setPending([]);
     setError(null);
     setStreaming(null);
+    setDrawing(null);
+    setStreamImages([]);
+    setRecovering(false);
   }
 
   async function deleteConversation(id: string, e: React.MouseEvent) {
@@ -235,12 +314,16 @@ export default function Chat({ username }: { username: string }) {
 
           if (event === "start") {
             activeId = data.conversationId;
+            viewing.current = data.conversationId;
             setConversationId((prev) => prev ?? data.conversationId);
+            savePending({ id: data.conversationId, answer: "", scenes: null });
           } else if (event === "delta") {
             answer += data.text;
             setStreaming(answer);
           } else if (event === "drawing") {
             setDrawing(data.scenes ?? []);
+            // 그림은 몇 분씩 걸린다. 그 사이 이 탭이 버려져도 무엇을 그리던 중이었는지 알게 남긴다.
+            if (activeId) savePending({ id: activeId, answer, scenes: data.scenes ?? [] });
           } else if (event === "image") {
             // 세 장을 한꺼번에 그린다. 다 끝나야(done) 그리기가 끝난 것이다.
             drawn.push({ id: `drawn-${drawn.length}`, url: data.url, caption: data.caption });
@@ -257,6 +340,7 @@ export default function Chat({ username }: { username: string }) {
                 images: drawn,
               },
             ]);
+            clearPending();
             setStreaming(null);
             setStreamImages([]);
             setDrawing(null);
@@ -266,28 +350,34 @@ export default function Chat({ username }: { username: string }) {
 
       loadConversations();
     } catch (err) {
-      setStreaming(null);
-      setStreamImages([]);
-      setDrawing(null);
-
       // 연결이 끊긴 것뿐이면(사파리는 이때 "Load failed" 라고만 알려준다) 서버는 아랑곳없이
-      // 답을 끝내고 DB 에 남긴다. 사용자를 놀래키지 말고, 답이 들어올 때까지 기다렸다 보여준다.
+      // 그림을 다 그리고 답을 DB 에 남긴다. 그러니 "그리는 중" 표시를 지우지 말고 그대로 둔 채,
+      // 답이 들어올 때까지 기다렸다가 보여준다. 사용자에겐 아무 일도 없던 것처럼 보인다.
       if (err instanceof TypeError && activeId) {
         const id = activeId;
         setRecovering(true);
-        setError("연결이 잠깐 끊겼습니다. 답을 이어받는 중입니다. 잠시만 기다려 주세요…");
         pollForAnswer(id).then((list) => {
+          clearPending();
+          if (viewing.current !== id) return;
+
           setRecovering(false);
+          setStreaming(null);
+          setStreamImages([]);
+          setDrawing(null);
+
           if (!list) {
             setError("답을 받아오지 못했습니다. 잠시 뒤 다시 보내주세요.");
             return;
           }
           setConversationId(id);
           setMessages(list);
-          setError(null);
           loadConversations();
         });
       } else {
+        clearPending();
+        setStreaming(null);
+        setStreamImages([]);
+        setDrawing(null);
         setError(err instanceof Error ? err.message : "전송에 실패했습니다.");
       }
     } finally {
@@ -698,14 +788,49 @@ function Bubble({ message }: { message: Message }) {
   );
 }
 
+function fileName(img: Attachment) {
+  const name = (img.caption ?? "그림").replace(/[\\/:*?"<>|]/g, " ").trim() || "그림";
+  return `${name}.png`;
+}
+
 /**
  * 서명 URL 은 우리 도메인이 아니라서 <a download> 만으로는 저장이 안 되고 새 탭으로 열린다.
  * Supabase 는 download 쿼리를 붙이면 첨부 파일로 내려보내 준다.
  */
 function downloadUrl(img: Attachment) {
-  const name = (img.caption ?? "그림").replace(/[\\/:*?"<>|]/g, " ").trim() || "그림";
   const sep = img.url.includes("?") ? "&" : "?";
-  return `${img.url}${sep}download=${encodeURIComponent(`${name}.png`)}`;
+  return `${img.url}${sep}download=${encodeURIComponent(fileName(img))}`;
+}
+
+/**
+ * 웹페이지가 사진첩에 직접 넣을 수는 없다. 대신 휴대폰에선 공유 시트를 띄운다.
+ * 거기서 "이미지 저장" 을 누르면 사진첩(갤러리)에 들어간다. 공유를 못 쓰는
+ * 데스크톱 브라우저에선 그냥 파일로 내려받는다.
+ */
+async function saveImage(img: Attachment) {
+  const name = fileName(img);
+
+  try {
+    const res = await fetch(img.url);
+    const blob = await res.blob();
+    const file = new File([blob], name, { type: blob.type || "image/png" });
+
+    if (navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: img.caption ?? "그림" });
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    // 사용자가 공유 시트를 그냥 닫은 것뿐이면 아무 일도 하지 않는다.
+    if (err instanceof DOMException && err.name === "AbortError") return;
+    window.open(downloadUrl(img), "_blank");
+  }
 }
 
 function Images({ images }: { images: Attachment[] }) {
@@ -726,11 +851,11 @@ function Images({ images }: { images: Attachment[] }) {
             <span className="text-[15px] leading-snug" style={{ color: "var(--muted)" }}>
               {img.caption}
             </span>
-            <a
-              href={downloadUrl(img)}
-              download
+            <button
+              onClick={() => saveImage(img)}
               className="flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[14px] font-medium transition hover:bg-white/5"
               style={{ borderColor: "var(--border)" }}
+              aria-label="그림 저장하기"
             >
               <svg
                 width="15"
@@ -748,7 +873,7 @@ function Images({ images }: { images: Attachment[] }) {
                 <path d="M5 21h14" />
               </svg>
               저장
-            </a>
+            </button>
           </figcaption>
         </figure>
       ))}
