@@ -129,6 +129,17 @@ export default function Chat({ username }: { username: string }) {
     setUploading(false);
   }
 
+  // AI 가 답하는 동안(그림을 그리는 동안도) 마이크는 잠긴다. 받아쓴 말이 다음 차례에
+  // 섞여 들어가고, 아직 안 끝난 답변에 대고 말하게 되기 때문이다.
+  const micLocked = sending;
+  const micLabel = drawing
+    ? "그림을 그리는 동안은 말할 수 없습니다"
+    : micLocked
+      ? "답을 쓰는 동안은 말할 수 없습니다"
+      : mic.recording
+        ? "말 그만하기"
+        : "음성으로 말하기";
+
   function toggleMic() {
     if (mic.recording || mic.connecting) {
       mic.stop();
@@ -136,8 +147,7 @@ export default function Chat({ username }: { username: string }) {
       return;
     }
 
-    // 그림을 그리는 동안은 마이크를 켤 수 없다.
-    if (drawing) return;
+    if (micLocked) return;
 
     setError(null);
     beforeMic.current = input.trim();
@@ -448,7 +458,7 @@ export default function Chat({ username }: { username: string }) {
               <div className="flex items-center gap-2">
                 <button
                   onClick={toggleMic}
-                  disabled={Boolean(drawing)}
+                  disabled={micLocked}
                   className={`flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40 ${
                     mic.recording ? "recording" : ""
                   }`}
@@ -457,20 +467,8 @@ export default function Chat({ username }: { username: string }) {
                     background: mic.recording ? "var(--accent)" : undefined,
                     color: mic.recording ? "#fff" : "var(--muted)",
                   }}
-                  aria-label={
-                    drawing
-                      ? "그림을 그리는 동안은 말할 수 없습니다"
-                      : mic.recording
-                        ? "말 그만하기"
-                        : "음성으로 말하기"
-                  }
-                  title={
-                    drawing
-                      ? "그림을 그리는 동안은 말할 수 없습니다"
-                      : mic.recording
-                        ? "말 그만하기"
-                        : "음성으로 말하기"
-                  }
+                  aria-label={micLabel}
+                  title={micLabel}
                 >
                   {mic.connecting ? <Spinner /> : mic.recording ? <StopIcon /> : <MicIcon />}
                 </button>
