@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { supabase, signImage } from "@/lib/supabase";
 import { extractStories } from "@/lib/story";
 
@@ -39,7 +40,11 @@ const when = (iso: string) =>
     minute: "2-digit",
   });
 
-export default async function AdminPage() {
+export default async function AdminPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ user?: string }>;
+}) {
   const { data } = await supabase
     .from("conversations")
     .select(
@@ -97,12 +102,34 @@ export default async function AdminPage() {
     })
     .sort((a, b) => b.latest.localeCompare(a.latest));
 
+  // ?user=이름 이 붙어 있으면 그 사람 것만 본다. 없으면 전체.
+  const { user: picked } = await searchParams;
+  const selected = typeof picked === "string" && users.some((u) => u.username === picked)
+    ? picked
+    : null;
+  const shown = selected ? users.filter((u) => u.username === selected) : users;
+
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-8">
       <h1 className="text-2xl font-semibold tracking-tight">이야기 모아보기</h1>
       <p className="mt-2 text-[16px]" style={{ color: "var(--muted)" }}>
         최근에 만든 것이 가장 위에 옵니다.
       </p>
+
+      {users.length > 0 && (
+        <div className="mt-6 flex flex-wrap gap-2">
+          <UserChip href="/admin" label="전체" count={users.length} active={!selected} />
+          {users.map((user) => (
+            <UserChip
+              key={user.username}
+              href={`/admin?user=${encodeURIComponent(user.username)}`}
+              label={user.username}
+              count={user.storyCount}
+              active={selected === user.username}
+            />
+          ))}
+        </div>
+      )}
 
       {users.length === 0 && (
         <p className="mt-20 text-center text-[17px]" style={{ color: "var(--muted)" }}>
@@ -111,7 +138,7 @@ export default async function AdminPage() {
       )}
 
       <div className="mt-8 space-y-12">
-        {users.map((user) => (
+        {shown.map((user) => (
           <section key={user.username}>
             <header
               className="sticky top-0 z-10 flex items-baseline gap-3 border-b py-3"
@@ -222,5 +249,32 @@ export default async function AdminPage() {
         ))}
       </div>
     </main>
+  );
+}
+
+function UserChip({
+  href,
+  label,
+  count,
+  active,
+}: {
+  href: string;
+  label: string;
+  count: number;
+  active: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      className="rounded-full border px-4 py-2 text-[16px] transition hover:bg-white/5"
+      style={{
+        borderColor: active ? "var(--accent)" : "var(--border)",
+        background: active ? "var(--accent)" : "var(--surface)",
+        color: active ? "#fff" : "var(--text)",
+      }}
+    >
+      {label}
+      <span className="ml-2 text-[14px] opacity-70">{count}</span>
+    </Link>
   );
 }
