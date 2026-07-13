@@ -6,7 +6,7 @@ import { getSession } from "@/lib/session";
 import { openai, CHAT_MODEL, IMAGE_MODEL, DRAW_TOOL, SYSTEM_PROMPT } from "@/lib/openai";
 import { sniffImage, isDrawable } from "@/lib/image";
 
-// 자서전 한 편이 3000-5000자라 생성이 길고, 그림도 세 장을 그린다.
+// 자서전 한 편이 2000-3000자라 생성이 길고, 그림도 세 장을 그린다.
 export const maxDuration = 300;
 
 type Scene = { title: string; prompt: string };
