@@ -266,7 +266,7 @@ function UserChip({
   return (
     <Link
       href={href}
-      className="rounded-full border px-4 py-2 text-[16px] transition hover:bg-white/5"
+      className="rounded-full border px-4 py-2 text-[16px] transition hover:bg-black/5"
       style={{
         borderColor: active ? "var(--accent)" : "var(--border)",
         background: active ? "var(--accent)" : "var(--surface)",

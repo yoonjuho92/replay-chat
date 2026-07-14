@@ -16,7 +16,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
       >
         <Link
           href="/"
-          className="flex h-11 w-11 items-center justify-center rounded-lg transition hover:bg-white/5"
+          className="flex h-11 w-11 items-center justify-center rounded-lg transition hover:bg-black/5"
           aria-label="채팅으로 돌아가기"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -27,13 +27,13 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         <nav className="flex flex-1 items-center gap-1">
           <Link
             href="/admin"
-            className="rounded-lg px-3 py-2 text-[16px] transition hover:bg-white/5"
+            className="rounded-lg px-3 py-2 text-[16px] transition hover:bg-black/5"
           >
             이야기 모아보기
           </Link>
           <Link
             href="/admin/password"
-            className="rounded-lg px-3 py-2 text-[16px] transition hover:bg-white/5"
+            className="rounded-lg px-3 py-2 text-[16px] transition hover:bg-black/5"
           >
             비밀번호
           </Link>

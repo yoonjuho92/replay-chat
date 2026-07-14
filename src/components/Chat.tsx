@@ -417,7 +417,7 @@ export default function Chat({ username }: { username: string }) {
       >
         <button
           onClick={() => setDrawerOpen(true)}
-          className="flex h-11 w-11 items-center justify-center rounded-lg transition hover:bg-white/5"
+          className="flex h-11 w-11 items-center justify-center rounded-lg transition hover:bg-black/5"
           style={{ color: "var(--text)" }}
           aria-label="이전 이야기 열기"
         >
@@ -430,7 +430,7 @@ export default function Chat({ username }: { username: string }) {
 
         <button
           onClick={newConversation}
-          className="flex h-11 w-11 items-center justify-center rounded-lg transition hover:bg-white/5"
+          className="flex h-11 w-11 items-center justify-center rounded-lg transition hover:bg-black/5"
           style={{ color: "var(--text)" }}
           aria-label="새 이야기 시작"
         >
@@ -580,7 +580,7 @@ export default function Chat({ username }: { username: string }) {
               <button
                 onClick={() => fileInput.current?.click()}
                 disabled={uploading}
-                className="flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-white/5 disabled:opacity-40"
+                className="flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-black/5 disabled:opacity-40"
                 style={{ borderColor: "var(--border)", color: "var(--muted)" }}
                 aria-label="사진 올리기"
                 title="사진 올리기"
@@ -605,7 +605,7 @@ export default function Chat({ username }: { username: string }) {
                 <button
                   onClick={toggleMic}
                   disabled={micLocked}
-                  className={`flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40 ${
+                  className={`flex h-12 w-12 items-center justify-center rounded-full border transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 ${
                     mic.recording ? "recording" : ""
                   }`}
                   style={{
@@ -688,7 +688,7 @@ function Drawer({
           <span className="text-[18px] font-semibold">이야기</span>
           <button
             onClick={onClose}
-            className="flex h-11 w-11 items-center justify-center rounded-lg text-lg transition hover:bg-white/5"
+            className="flex h-11 w-11 items-center justify-center rounded-lg text-lg transition hover:bg-black/5"
             style={{ color: "var(--muted)" }}
             aria-label="닫기"
           >
@@ -717,7 +717,7 @@ function Drawer({
             <div
               key={c.id}
               onClick={() => onSelect(c.id)}
-              className="group flex cursor-pointer items-center gap-2 rounded-lg px-3 py-3.5 text-[17px] transition hover:bg-white/5"
+              className="group flex cursor-pointer items-center gap-2 rounded-lg px-3 py-3.5 text-[17px] transition hover:bg-black/5"
               style={{ background: c.id === conversationId ? "var(--elevated)" : undefined }}
             >
               <span className="flex-1 truncate">{c.title}</span>
@@ -737,7 +737,7 @@ function Drawer({
           {admin && (
             <Link
               href="/admin"
-              className="flex items-center gap-3 rounded-lg px-3 py-3 text-[17px] transition hover:bg-white/5"
+              className="flex items-center gap-3 rounded-lg px-3 py-3 text-[17px] transition hover:bg-black/5"
               style={{ color: "var(--text)" }}
             >
               <KeyIcon />
@@ -864,7 +864,7 @@ function Images({ images }: { images: Attachment[] }) {
             </span>
             <button
               onClick={() => saveImage(img)}
-              className="flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[14px] font-medium transition hover:bg-white/5"
+              className="flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[14px] font-medium transition hover:bg-black/5"
               style={{ borderColor: "var(--border)" }}
               aria-label="그림 저장하기"
             >
@@ -968,7 +968,7 @@ function StoryBox({
         {!writing && text.length > 0 && (
           <button
             onClick={copy}
-            className="rounded-lg px-2.5 py-1.5 text-[14px] transition hover:bg-white/5"
+            className="rounded-lg px-2.5 py-1.5 text-[14px] transition hover:bg-black/5"
             style={{ color: "var(--muted)" }}
           >
             {copied ? "복사했어요" : "복사"}
