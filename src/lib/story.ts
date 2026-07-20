@@ -46,3 +46,60 @@ export function extractStories(content: string) {
     .map((s) => s.text.trim())
     .filter(Boolean);
 }
+
+/**
+ * 한 답변 안의 <story> 블록들을 나온 순서대로. index 는 0부터.
+ * 특정 블록만 골라 고쳐 쓰려면 그 자리(index)를 알아야 해서 본문과 함께 돌려준다.
+ */
+export function storyBlocks(content: string): { index: number; text: string }[] {
+  const blocks: { index: number; text: string }[] = [];
+  let rest = content;
+  let index = 0;
+
+  while (true) {
+    const start = rest.indexOf(STORY_OPEN);
+    if (start === -1) break;
+
+    const after = start + STORY_OPEN.length;
+    const end = rest.indexOf(STORY_CLOSE, after);
+    // 아직 안 닫힌 마지막 블록도 하나로 본다.
+    blocks.push({ index, text: end === -1 ? rest.slice(after) : rest.slice(after, end) });
+    index += 1;
+
+    if (end === -1) break;
+    rest = rest.slice(end + STORY_CLOSE.length);
+  }
+
+  return blocks;
+}
+
+/** index 번째 <story> 블록의 본문만 새 글로 갈아끼운다. 밖의 글과 다른 블록은 그대로 둔다. */
+export function replaceStory(content: string, index: number, newText: string): string {
+  let rest = content;
+  let result = "";
+  let i = 0;
+
+  while (true) {
+    const start = rest.indexOf(STORY_OPEN);
+    if (start === -1) {
+      result += rest;
+      break;
+    }
+
+    const after = start + STORY_OPEN.length;
+    const end = rest.indexOf(STORY_CLOSE, after);
+
+    result += rest.slice(0, after); // 여는 태그까지 그대로
+    if (end === -1) {
+      result += i === index ? newText : rest.slice(after);
+      break;
+    }
+
+    result += i === index ? newText : rest.slice(after, end);
+    result += STORY_CLOSE;
+    rest = rest.slice(end + STORY_CLOSE.length);
+    i += 1;
+  }
+
+  return result;
+}

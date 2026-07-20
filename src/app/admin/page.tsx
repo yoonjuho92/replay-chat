@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { supabase, signImage } from "@/lib/supabase";
-import { extractStories } from "@/lib/story";
+import { storyBlocks } from "@/lib/story";
+import AdminStoryEditor from "@/components/AdminStoryEditor";
 
 type Row = {
   id: string;
@@ -8,6 +9,7 @@ type Row = {
   updated_at: string;
   users: { username: string } | null;
   messages: {
+    id: string;
     role: string;
     content: string;
     created_at: string;
@@ -16,7 +18,7 @@ type Row = {
 };
 
 type Image = { id: string; url: string; caption: string | null };
-type Story = { text: string; at: string; sortKey: string };
+type Story = { messageId: string; index: number; text: string; at: string; sortKey: string };
 
 async function sign(
   list: { id: string; storage_path: string; caption: string | null }[],
@@ -48,7 +50,7 @@ export default async function AdminPage({
   const { data } = await supabase
     .from("conversations")
     .select(
-      "id, title, updated_at, users(username), messages(role, content, created_at, attachments(id, storage_path, caption))",
+      "id, title, updated_at, users(username), messages(id, role, content, created_at, attachments(id, storage_path, caption))",
     )
     .overrideTypes<Row[]>();
 
@@ -60,11 +62,15 @@ export default async function AdminPage({
       // 한 세션에서 이야기를 여러 번 고쳐 쓸 수 있다. 늦게 쓴 것이 위로 온다.
       const stories: Story[] = answers
         .flatMap((m) =>
-          extractStories(m.content).map((text) => ({
-            text,
-            at: when(m.created_at),
-            sortKey: m.created_at,
-          })),
+          storyBlocks(m.content)
+            .filter((b) => b.text.trim())
+            .map((b) => ({
+              messageId: m.id,
+              index: b.index,
+              text: b.text.trim(),
+              at: when(m.created_at),
+              sortKey: m.created_at,
+            })),
         )
         .sort((a, b) => b.sortKey.localeCompare(a.sortKey));
 
@@ -92,10 +98,22 @@ export default async function AdminPage({
         .filter((s) => s.username === username)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
+      // 이 사람의 가장 최근 이야기 한 블록. 새 대화가 띄우는 것과 같은 기준
+      // (가장 늦은 답변의 마지막 블록)으로 골라, 여기서 고치면 채팅에도 반영된다.
+      const latestStory = own
+        .flatMap((s) => s.stories)
+        .reduce<Story | null>((best, s) => {
+          if (!best) return s;
+          if (s.sortKey > best.sortKey) return s;
+          if (s.sortKey === best.sortKey && s.index > best.index) return s;
+          return best;
+        }, null);
+
       return {
         username,
         sessions: own,
         latest: own[0]?.updatedAt ?? "",
+        latestStoryKey: latestStory ? `${latestStory.messageId}:${latestStory.index}` : null,
         storyCount: own.reduce((n, s) => n + s.stories.length, 0),
         drawnCount: own.reduce((n, s) => n + s.drawn.length, 0),
       };
@@ -166,30 +184,44 @@ export default async function AdminPage({
                     </p>
                   </header>
 
-                  {session.stories.map((story, i) => (
-                    <article
-                      key={story.sortKey + i}
-                      className="border-b px-5 py-5"
-                      style={{ borderColor: "var(--border)" }}
-                    >
-                      <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                        <span
-                          className="text-[14px] font-semibold"
-                          style={{ color: "var(--accent)" }}
-                        >
-                          {i === 0 && session.stories.length > 1
-                            ? "가장 최근 이야기"
-                            : `이야기 ${session.stories.length - i}`}
-                        </span>
-                        <span className="text-[13px]" style={{ color: "var(--muted)" }}>
-                          {story.at} · {[...story.text].length.toLocaleString()}자
-                        </span>
-                      </div>
-                      <p className="text-[17px] leading-[1.95] whitespace-pre-wrap">
-                        {story.text}
-                      </p>
-                    </article>
-                  ))}
+                  {session.stories.map((story, i) => {
+                    const editable =
+                      user.latestStoryKey === `${story.messageId}:${story.index}`;
+
+                    return (
+                      <article
+                        key={story.sortKey + i}
+                        className="border-b px-5 py-5"
+                        style={{ borderColor: "var(--border)" }}
+                      >
+                        <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                          <span
+                            className="text-[14px] font-semibold"
+                            style={{ color: "var(--accent)" }}
+                          >
+                            {editable
+                              ? "가장 최근 이야기"
+                              : `이야기 ${session.stories.length - i}`}
+                          </span>
+                          <span className="text-[13px]" style={{ color: "var(--muted)" }}>
+                            {story.at} · {[...story.text].length.toLocaleString()}자
+                          </span>
+                        </div>
+
+                        {editable ? (
+                          <AdminStoryEditor
+                            messageId={story.messageId}
+                            index={story.index}
+                            initialText={story.text}
+                          />
+                        ) : (
+                          <p className="text-[17px] leading-[1.95] whitespace-pre-wrap">
+                            {story.text}
+                          </p>
+                        )}
+                      </article>
+                    );
+                  })}
 
                   {session.drawn.length > 0 && (
                     <div className="border-b px-5 py-5" style={{ borderColor: "var(--border)" }}>
