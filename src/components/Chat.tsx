@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useRealtimeTranscription } from "@/hooks/useRealtimeTranscription";
-import { parseStory } from "@/lib/story";
+import { parseStory, STORY_OPEN, STORY_CLOSE } from "@/lib/story";
 import { normalizeImage } from "@/lib/normalize-image";
 
 /** /admin 에 들어갈 수 있는 사람. 서버에서 한 번 더 막으므로 여기선 링크 노출용일 뿐이다. */
@@ -75,6 +75,8 @@ export default function Chat({ username }: { username: string }) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // 지금까지 남긴 이야기 중 가장 최근 것. 새 대화를 열면 안내 문구 대신 이걸 띄운다.
+  const [latestStory, setLatestStory] = useState<string | null>(null);
 
   const [input, setInput] = useState("");
   const [pending, setPending] = useState<Attachment[]>([]);
@@ -108,6 +110,18 @@ export default function Chat({ username }: { username: string }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadConversations();
   }, [loadConversations]);
+
+  const loadLatestStory = useCallback(() => {
+    // 가장 최근에 남긴 이야기 하나를 받아 둔다. 새 대화 첫 화면에 띄우는 용도.
+    fetch("/api/latest-story")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setLatestStory(data?.story ?? null))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadLatestStory();
+  }, [loadLatestStory]);
 
   useEffect(() => {
     // 그림을 그리는 사이 다른 탭에 다녀오면 브라우저가 이 탭을 버렸다 새로 띄우기도 한다.
@@ -191,6 +205,8 @@ export default function Chat({ username }: { username: string }) {
     setDrawerOpen(false);
     setConversationId(null);
     setMessages([]);
+    // 방금 마친 대화에서 이야기가 새로 다듬어졌을 수 있으니 다시 받아 온다.
+    loadLatestStory();
     setInput("");
     setPending([]);
     setError(null);
@@ -322,6 +338,21 @@ export default function Chat({ username }: { username: string }) {
             viewing.current = data.conversationId;
             setConversationId((prev) => prev ?? data.conversationId);
             savePending({ id: data.conversationId, answer: "", scenes: null });
+
+            // 새 대화면 서버가 지난 이야기를 첫 메시지로 앉힌다. 낙관적으로 넣어 둔
+            // 사용자 메시지 바로 앞에 끼워, 화면 맨 위에 이야기가 오게 한다.
+            if (data.storyMessage) {
+              setMessages((prev) => {
+                const story: Message = {
+                  id: data.storyMessage.id,
+                  role: "assistant",
+                  content: data.storyMessage.content,
+                  images: [],
+                };
+                const at = Math.max(prev.length - 1, 0);
+                return [...prev.slice(0, at), story, ...prev.slice(at)];
+              });
+            }
           } else if (event === "delta") {
             answer += data.text;
             setStreaming(answer);
@@ -456,22 +487,29 @@ export default function Chat({ username }: { username: string }) {
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl px-4 py-6">
           {empty ? (
-            <div className="mt-[20vh] text-center">
-              <div
-                className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl text-xl"
-                style={{ background: "var(--accent)" }}
-              >
-                ✍️
+            latestStory ? (
+              // 이야기를 남긴 적 있는 사람에겐, 가장 최근 이야기를 첫 메시지처럼 띄운다.
+              <div className="space-y-4">
+                <AssistantBody content={`${STORY_OPEN}${latestStory}${STORY_CLOSE}`} />
               </div>
-              <h2 className="mt-6 text-2xl font-semibold tracking-tight">
-                어떤 순간을 남겨볼까요?
-              </h2>
-              <p className="mt-4 text-[17px] leading-[1.8]" style={{ color: "var(--muted)" }}>
-                겪었던 일을 편하게, 하시던 말 그대로 들려주세요.
-                <br />
-                마이크로 말해도 되고, 사진을 함께 올려도 좋아요.
-              </p>
-            </div>
+            ) : (
+              <div className="mt-[20vh] text-center">
+                <div
+                  className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl text-xl"
+                  style={{ background: "var(--accent)" }}
+                >
+                  ✍️
+                </div>
+                <h2 className="mt-6 text-2xl font-semibold tracking-tight">
+                  어떤 순간을 남겨볼까요?
+                </h2>
+                <p className="mt-4 text-[17px] leading-[1.8]" style={{ color: "var(--muted)" }}>
+                  겪었던 일을 편하게, 하시던 말 그대로 들려주세요.
+                  <br />
+                  마이크로 말해도 되고, 사진을 함께 올려도 좋아요.
+                </p>
+              </div>
+            )
           ) : (
             <div className="space-y-7">
               {messages.map((m) => (

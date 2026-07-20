@@ -5,6 +5,8 @@ import { supabase, signImage, IMAGE_BUCKET } from "@/lib/supabase";
 import { getSession } from "@/lib/session";
 import { openai, CHAT_MODEL, IMAGE_MODEL, DRAW_TOOL, SYSTEM_PROMPT } from "@/lib/openai";
 import { sniffImage, isDrawable } from "@/lib/image";
+import { latestStoryFor } from "@/lib/latest-story";
+import { STORY_OPEN, STORY_CLOSE } from "@/lib/story";
 
 // 자서전 한 편이 2000-3000자라 생성이 길고, 그림도 세 장을 그린다.
 export const maxDuration = 300;
@@ -94,6 +96,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "보낼 내용이 없습니다." }, { status: 400 });
   }
 
+  // 새 대화라면, 지난 이야기 중 가장 최근 것을 첫 메시지로 앉힌다. 그 이야기의 결을
+  // 이어받아 대화가 시작되도록. 클라이언트도 이 메시지를 받아 화면 맨 위에 띄운다.
+  let storyMessage: { id: string; content: string } | null = null;
+
   if (conversationId) {
     const { data: owned } = await supabase
       .from("conversations")
@@ -114,6 +120,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: error?.message ?? "대화 생성 실패" }, { status: 500 });
     }
     conversationId = data.id;
+
+    const story = await latestStoryFor(session.userId);
+    if (story) {
+      // 사용자 메시지보다 먼저 넣어야(더 이른 created_at) 맨 앞에 온다.
+      const content = `${STORY_OPEN}${story}${STORY_CLOSE}`;
+      const { data: seed } = await supabase
+        .from("messages")
+        .insert({ conversation_id: conversationId, role: "assistant", content })
+        .select("id")
+        .single();
+      if (seed) storyMessage = { id: seed.id, content };
+    }
   }
 
   const { data: userMessage, error: userMessageError } = await supabase
@@ -211,7 +229,7 @@ export async function POST(req: Request) {
       // 주석 한 줄을 흘려보내 연결을 살려 둔다. 클라이언트는 이 프레임을 무시한다.
       const heartbeat = setInterval(() => write(": keep-alive\n\n"), 10_000);
 
-      send("start", { conversationId, userMessageId: userMessage.id });
+      send("start", { conversationId, userMessageId: userMessage.id, storyMessage });
 
       let answer = "";
       const drawn: { path: string; caption: string }[] = [];
